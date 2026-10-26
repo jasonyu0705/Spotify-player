@@ -111,4 +111,4 @@ The serial monitor (115200 baud) logs every failed Spotify call with its reason.
 - `src/net/`: WiFi and clock sync
 - `lib/TouchCalibration/`: touch calibration shared with the bring-up test
 - `tools/get_refresh_token.py`: one-time Spotify login
-# Spotify-player
+
