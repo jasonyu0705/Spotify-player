@@ -72,13 +72,22 @@ void PlayerUI::begin(const char *backendName) {
   tft_.fillScreen(BG);
 }
 
+void PlayerUI::setVisible(bool visible) {
+  visible_ = visible;
+  if (visible) {
+    mode_ = Mode::None;  // force a full redraw after leaving the photo screen
+    noticeUntil_ = 0;
+  }
+}
+
 void PlayerUI::setBrightness(uint8_t percent) {
   if (brightness_ == percent) return;
   brightness_ = percent;
-  if (mode_ != Mode::None) drawBrightnessButton();
+  if (visible_ && mode_ != Mode::None) drawBrightnessButton();
 }
 
 void PlayerUI::showMessage(const char *title, const char *detail) {
+  if (!visible_) return;
   mode_ = Mode::Message;
   tft_.fillScreen(BG);
   drawStatusBar();
@@ -93,12 +102,14 @@ void PlayerUI::showMessage(const char *title, const char *detail) {
 }
 
 void PlayerUI::showStatus(BackendStatus status) {
+  if (!visible_) return;
   if (mode_ == Mode::Message && messageStatus_ == status) return;
   messageStatus_ = status;
   showMessage(statusTitle(status), statusDetail(status));
 }
 
 void PlayerUI::showClock() {
+  if (!visible_) return;
   if (mode_ == Mode::Clock) return;
   mode_ = Mode::Clock;
   Serial.println("Display: idle clock");
@@ -144,6 +155,7 @@ void PlayerUI::drawClock(bool force) {
 }
 
 void PlayerUI::update(const NowPlaying &np) {
+  if (!visible_) return;
   if (mode_ != Mode::Player) {
     shown_ = np;
     redrawAll();
@@ -184,6 +196,7 @@ void PlayerUI::redrawAll() {
 }
 
 void PlayerUI::tick() {
+  if (!visible_) return;
   uint32_t now = millis();
   if (noticeUntil_ && now > noticeUntil_) {
     noticeUntil_ = 0;
@@ -195,6 +208,7 @@ void PlayerUI::tick() {
 }
 
 void PlayerUI::showNotice(const char *text) {
+  if (!visible_) return;
   notice_ = text;
   noticeUntil_ = millis() + NOTICE_MS;
   drawStatusBar();
@@ -361,10 +375,8 @@ void PlayerUI::drawBrightnessButton() {
 
 // --- touch -----------------------------------------------------------------
 
-UiAction PlayerUI::handleTouch(bool pressed, uint16_t x, uint16_t y) {
-  const bool pressEdge = pressed && !wasPressed_;
-  wasPressed_ = pressed;
-  if (!pressEdge) return UiAction::None;
+UiAction PlayerUI::actionAt(uint16_t x, uint16_t y) const {
+  if (!visible_) return UiAction::None;
 
   const bool inPanel = x >= PANEL_X0 - 12;
   const int slot = constrain((int(x) - PANEL_X0) / SLOT_W, 0, 2);

@@ -13,6 +13,7 @@ class PlayerUI {
   explicit PlayerUI(TFT_eSPI &tft) : tft_(tft) {}
 
   void begin(const char *backendName);
+  void setVisible(bool visible);  // Spotify keeps syncing while the photo screen is open
   void setBrightness(uint8_t percent);
 
   // Full-screen message, e.g. "Connecting..." or "Nothing playing".
@@ -26,9 +27,9 @@ class PlayerUI {
   // Call every loop: moves progress between polls and clears expired notices.
   void tick();
 
-  // Pass the debounced touch state every loop. Returns what the user asked for.
+  // Called only after a completed tap (swipes are handled by the app).
   // Tapping the album art also toggles play/pause.
-  UiAction handleTouch(bool pressed, uint16_t x, uint16_t y);
+  UiAction actionAt(uint16_t x, uint16_t y) const;
 
   // Brief red notice in the status bar, e.g. when a command fails.
   void showNotice(const char *text);
@@ -59,7 +60,7 @@ class PlayerUI {
   int32_t lastSecond_ = -1;
   int64_t lastClockMinute_ = -2;
 
-  bool wasPressed_ = false;
+  bool visible_ = true;
   uint8_t brightness_ = 100;
 
   String notice_;

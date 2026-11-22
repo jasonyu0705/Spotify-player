@@ -8,3 +8,13 @@ __pycache__/
 
 # WiFi password, Spotify secret and refresh token
 include/secrets.h
+
+# Personal photo originals, generated flash images, and the preparation environment
+/photos/
+/data/photos/*
+!/data/photos/.gitkeep
+/.venv/
+
+# Raspberry Pi service credentials and rotated Spotify tokens
+/pi/spotify.env
+/pi/*.tokens.json

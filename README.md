@@ -1,8 +1,9 @@
 # Spotify ESP controller
 
-A Spotify now-playing screen with touch controls on the Hosyond 4.0" ESP32 board
+A Spotify now-playing screen and swipe-to-open photo frame with touch controls on the Hosyond 4.0" ESP32 board
 (ESP32-WROOM-32E, ST7796 320x480, XPT2046 resistive touch). The ESP32 talks to the
-Spotify Web API directly; no server needed.
+Spotify Web API directly by default. A Raspberry Pi can instead handle Spotify
+polling, authentication, artwork, and commands; see [Pi setup](pi/README.md).
 
 Actual album covers download over HTTPS in the background and are cached until
 the cover URL changes. Transfers yield to queued playback commands between
@@ -68,19 +69,89 @@ Your setting is saved one second after the last tap and restored on restart.
 Paused music keeps the Spotify screen, artwork, and controls visible. When
 Spotify reports no active track or device, the screen instead shows a large
 12-hour clock with AM/PM and the date, with "Nothing is playing" underneath. The clock uses
-America/Chicago time (including daylight saving time); change `CLOCK_TIMEZONE`
+America/Los_Angeles time (including daylight saving time); change `CLOCK_TIMEZONE`
 in `src/config.h` for another timezone. Until NTP syncs, it shows `--:--`.
 Idle polling and connection errors keep the clock visible, and only the time
 area redraws when the minute changes. Album art loads for both playing and paused
 tracks. The player returns automatically when Spotify reports a track again.
+If Spotify cannot load a track because of an authorization or Premium error,
+the clock stays visible with a brief error notice. The clock and photo frame
+do not require Spotify Premium; time synchronization only needs internet access.
 The controller reads Spotify's playback state; closing the app switches to the
 clock once Spotify stops reporting that device/track.
+
+## Photo frame (internal storage, no microSD needed)
+
+Swipe horizontally anywhere on the display to switch between Spotify and your
+photo album. Spotify keeps syncing in the background; swiping back restores its
+latest state. Taps register on release so swipes do not trigger playback buttons.
+
+Photos advance every **5 minutes**. Tap a photo to advance immediately; tap the
+clock badge in the top-right corner to cycle brightness. The clock uses the
+same America/Los_Angeles timezone as the idle clock and shows `--:--` until NTP syncs.
+Change `PHOTO_INTERVAL_MS` or `CLOCK_TIMEZONE` in `src/config.h` to customize them.
+
+### Add your photos
+
+1. Put around **10 original photos** in the project's `photos/` folder. Use JPG,
+   PNG, WebP, or BMP; export HEIC images to JPEG first. Files play in filename order,
+   so use names such as `01-family.jpg`, `02-vacation.jpg`.
+2. Set up the preparation helper once (from the project root):
+
+   ```bash
+   python3 -m venv .venv
+   .venv/bin/python -m pip install -r tools/requirements-photos.txt
+   ```
+
+3. Prepare the images:
+
+   ```bash
+   .venv/bin/python tools/prepare_photos.py
+   ```
+
+   Originals stay untouched. The helper corrects EXIF orientation, removes image
+   metadata, and writes 480x320 baseline JPEGs to `data/photos/`. It preserves the
+   whole photo with dark borders when needed. To fill the screen by cropping:
+
+   ```bash
+   .venv/bin/python tools/prepare_photos.py --crop
+   ```
+
+4. Connect the display over USB. Upload the updated firmware **once**, then the
+   photo filesystem:
+
+   ```bash
+   pio run -e controller -t upload
+   pio run -e controller -t uploadfs
+   ```
+
+   You can also use PlatformIO's **Upload** and **Upload Filesystem Image** tasks
+   under the `controller` environment. Close the serial monitor before uploading.
+
+When changing the album later, add/remove originals in `photos/`, rerun the helper,
+and run only `pio run -e controller -t uploadfs`. This replaces the previous uploaded
+album. Ordinary firmware uploads keep the album with this unchanged partition map.
+WiFi credentials, brightness, and touch calibration live in a separate NVS partition.
+See [PlatformIO's filesystem upload documentation](https://docs.platformio.org/en/latest/platforms/espressif32.html#uploading-files-to-file-system).
+
+The existing flash layout reserves **896 KiB** for files. The helper caps each
+prepared image at 60 KiB and all data at 700 KiB, leaving room for filesystem
+metadata; ten photos fit within that budget. Up to 32 photos are supported if they
+fit. Photos stream directly from LittleFS without loading an entire photo into RAM.
+Original and generated photo files are git-ignored. Only files under `data/` are
+included in the filesystem upload; keep originals and documentation in `photos/`.
+
+If the photo screen says **Add your photos**, prepare the images and upload the
+filesystem. A failed mount never automatically formats or erases the photo storage.
+The album remains available without WiFi; after a cold boot, the clock needs WiFi
+once to obtain the time. No photo-upload webpage or microSD card is required.
 
 ## Envs
 
 | Env | What it builds |
 | --- | --- |
 | `controller` | Spotify player (default) |
+| `controller-pi` | Spotify player reading the Raspberry Pi's local cache |
 | `bringup` | Screen + touch hardware test (`testing/bringup/`) |
 
 ## Touch calibration
@@ -107,8 +178,32 @@ The serial monitor (115200 baud) logs every failed Spotify call with its reason.
 
 - `src/backend/`: `PlayerBackend` interface, `SpotifyBackend`, and
   `BackendWorker` (runs the backend on core 0 so network calls never freeze the UI)
-- `src/ui/`: the player screen, icons, theme/layout, text helpers
+- `src/ui/`: player screen, photo frame, swipe recognition, icons, theme/layout, text helpers
+- `photos/`: original personal photos (git-ignored)
+- `data/photos/`: prepared JPEGs uploaded to LittleFS (git-ignored)
+- `tools/prepare_photos.py`: desktop resizing, orientation correction, and JPEG conversion
 - `src/net/`: WiFi and clock sync
 - `lib/TouchCalibration/`: touch calibration shared with the bring-up test
 - `tools/get_refresh_token.py`: one-time Spotify login
 
+## Local checks
+
+Photo preparation tests (after installing the helper requirements):
+
+```bash
+.venv/bin/python -m unittest discover -s test -p 'test_*.py'
+```
+
+Gesture regression check (host C++ compiler):
+
+```bash
+c++ -std=c++11 test/host_touch_gesture.cpp -o /tmp/host_touch_gesture
+/tmp/host_touch_gesture
+```
+
+Build firmware and the filesystem without flashing:
+
+```bash
+pio run -e controller
+pio run -e controller -t buildfs
+```

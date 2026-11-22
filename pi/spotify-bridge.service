@@ -1,0 +1,15 @@
+[Unit]
+Description=Spotify polling bridge for ESP32 display
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/Spotify_ESP/pi
+ExecStart=/usr/bin/python3 %h/projects/Spotify_ESP/pi/spotify_bridge.py
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

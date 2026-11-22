@@ -13,12 +13,24 @@
 #include "config.h"
 #include "ui/PlayerUI.h"
 #include "ui/Backlight.h"
+#include "ui/PhotoFrame.h"
+#include "ui/TouchGesture.h"
 
 #if !__has_include("secrets.h")
 #error "Copy include/secrets.h.example to include/secrets.h and fill it in (see README.md)"
 #endif
 #include "secrets.h"
+#ifdef USE_PI_BACKEND
+#include "backend/PiBackend.h"
+#ifndef PI_SERVER_URL
+#define PI_SERVER_URL "http://raspberrypi.local:8765"
+#endif
+#ifndef PI_API_TOKEN
+#define PI_API_TOKEN ""
+#endif
+#else
 #include "backend/SpotifyBackend.h"
+#endif
 #include "net/Network.h"
 
 using Command = BackendWorker::CommandType;
@@ -26,7 +38,14 @@ using Command = BackendWorker::CommandType;
 TFT_eSPI tft;
 PlayerUI ui(tft);
 Backlight backlight;
+PhotoFrame photoFrame(tft);
+TouchGesture gesture;
+bool showingPhotos = false;
+#ifdef USE_PI_BACKEND
+PiBackend backend(PI_SERVER_URL, PI_API_TOKEN);
+#else
 SpotifyBackend backend(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, SPOTIFY_REFRESH_TOKEN);
+#endif
 BackendWorker worker(backend, POLL_INTERVAL_MS);
 
 NowPlaying nowPlaying;  // latest state, plus any instant feedback applied locally
@@ -93,8 +112,10 @@ void recalibrateIfRequested() {
 
   if (requested) {
     touchcal::loadOrCalibrate(tft, SCREEN_ROTATION, true);
+    gesture.reset();
     ui.showMessage("Calibrated", "Loading player...");
-    if (showingClock) ui.showClock();
+    if (showingPhotos) photoFrame.show();
+    else if (showingClock) ui.showClock();
     else if (havePlayback) ui.update(nowPlaying);
   }
 }
@@ -122,11 +143,9 @@ void applyUpdate(const BackendWorker::Update &update) {
     if (havePlayback) retainLastPlayback(nowPlaying, millis());
     showingClock = true;
     ui.showClock();
-  } else if (showingClock || (!havePlayback &&
-             (update.status == BackendStatus::NetworkError ||
-              update.status == BackendStatus::RateLimited))) {
-    // An idle/offline device stays a clock while background polling retries.
-    // Do not flash connection/error screens on every empty or failed poll.
+  } else if (showingClock || !havePlayback) {
+    // Without a loaded track, every backend error falls back to the clock.
+    // Spotify authorization/Premium failures must not hide the local time.
     showingClock = true;
     ui.showClock();
     if (statusChanged) ui.showNotice(statusTitle(update.status));
@@ -185,6 +204,22 @@ void runAction(UiAction action) {
   }
 }
 
+void switchScreen() {
+  showingPhotos = !showingPhotos;
+  ui.setVisible(!showingPhotos);
+  if (showingPhotos) {
+    photoFrame.show();
+  } else if (showingClock) {
+    ui.showClock();
+  } else if (havePlayback) {
+    ui.update(nowPlaying);
+  } else if (lastStatus != BackendStatus::Ok) {
+    ui.showStatus(lastStatus);
+  } else {
+    ui.showMessage("Connecting to Spotify...", "");
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   pinMode(BOOT_BUTTON, INPUT_PULLUP);
@@ -211,6 +246,7 @@ void setup() {
   } else {
     ui.showMessage("WiFi not connected", "Still trying - check WiFi settings");
   }
+  photoFrame.begin();
   backend.begin();
   worker.start();
   Serial.printf("Free heap %u, largest block %u\n", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
@@ -221,13 +257,28 @@ void loop() {
 
   uint16_t x, y;
   bool pressed = readTouch(x, y);
-  UiAction action = ui.handleTouch(pressed, x, y);
-  runAction(action);
+  TouchEvent event = gesture.update(pressed, x, y, millis());
+  if (event == TouchEvent::SwipeLeft || event == TouchEvent::SwipeRight) {
+    switchScreen();
+  } else if (event == TouchEvent::Tap) {
+    if (showingPhotos) {
+      // The clock badge doubles as a brightness control.
+      if (photoFrame.clockContains(gesture.tapX(), gesture.tapY())) {
+        backlight.cycle();
+        ui.setBrightness(backlight.percent());
+      } else {
+        photoFrame.next();
+      }
+    } else {
+      runAction(ui.actionAt(gesture.tapX(), gesture.tapY()));
+    }
+  }
 
   BackendWorker::Update update;
   if (worker.takeUpdate(update)) applyUpdate(update);
 
-  ui.tick();
+  if (showingPhotos) photoFrame.tick();
+  else ui.tick();
   backlight.tick();
   delay(5);
 }
