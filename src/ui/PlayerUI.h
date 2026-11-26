@@ -68,6 +68,7 @@ class PlayerUI {
   String lastWeatherText_;
   String lastWeatherLocation_;
   String lastPiAddress_;
+  String lastEspAddress_;
   int lastWeatherCode_ = -2;
   bool lastWeatherDay_ = true;
 

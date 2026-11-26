@@ -234,11 +234,11 @@ void PlayerUI::drawIdleDetails(bool force) {
     code = idleInfo_.weatherCode;
     day = idleInfo_.isDay;
   }
-  if (force || text != lastWeatherText_ || location != lastWeatherLocation_ || idleInfo_.piAddress != lastPiAddress_ ||
-      code != lastWeatherCode_ || day != lastWeatherDay_) {
+  const bool weatherChanged = force || text != lastWeatherText_ || location != lastWeatherLocation_ ||
+                              code != lastWeatherCode_ || day != lastWeatherDay_;
+  if (weatherChanged) {
     lastWeatherText_ = text;
     lastWeatherLocation_ = location;
-    lastPiAddress_ = idleInfo_.piAddress;
     lastWeatherCode_ = code;
     lastWeatherDay_ = day;
     tft_.fillRect(0, 220, W, 56, BG);
@@ -254,9 +254,18 @@ void PlayerUI::drawIdleDetails(bool force) {
     tft_.setTextDatum(MC_DATUM);
     tft_.setTextColor(TEXT_TERTIARY, BG);
     tft_.drawString(fitText(tft_, toDisplayText(location), 2, W - 2 * MARGIN), W / 2, 263, 2);
-    tft_.fillRect(MARGIN, 288, 300, 24, BG);
+  }
+  const String espAddress = wifi ? net::localAddress() : String("Offline");
+  if (weatherChanged || espAddress != lastEspAddress_ || idleInfo_.piAddress != lastPiAddress_) {
+    lastEspAddress_ = espAddress;
+    lastPiAddress_ = idleInfo_.piAddress;
+    tft_.fillRect(MARGIN, 274, 300, 38, BG);
+    tft_.setTextSize(1);
+    tft_.setTextPadding(0);
+    tft_.setTextDatum(ML_DATUM);
+    tft_.setTextColor(TEXT_TERTIARY, BG);
+    tft_.drawString(fitText(tft_, String("ESP: ") + espAddress, 2, 300), MARGIN, 282, 2);
     if (idleInfo_.usesPi && !idleInfo_.piAddress.isEmpty()) {
-      tft_.setTextDatum(ML_DATUM);
       tft_.drawString(fitText(tft_, String("Pi: ") + idleInfo_.piAddress, 2, 300), MARGIN, 300, 2);
     }
   }
@@ -502,7 +511,7 @@ UiAction PlayerUI::actionAt(uint16_t x, uint16_t y) const {
   if (mode_ != Mode::None && inPanel && y >= SUB_ROW_TOP && y < H && slot == 1) {
     return UiAction::CycleBrightness;
   }
-  if (mode_ == Mode::Clock && idleInfo_.usesPi && y >= 220 && y < 278) {
+  if (mode_ == Mode::Clock && idleInfo_.usesPi && y >= 220 && y < 274) {
     return UiAction::WeatherInfo;
   }
   if (mode_ != Mode::Player) return UiAction::None;

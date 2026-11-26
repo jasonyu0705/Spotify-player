@@ -128,7 +128,8 @@ Use `WEATHER_REFRESH_SECONDS=3600` for hourly updates. Restart the Pi service
 after changing these values; no ESP32 reflash is needed for location, units, or
 refresh interval changes. The Pi sends the configured coordinates to Open-Meteo.
 The free endpoint requires no API key for this personal, non-commercial project.
-The idle screen shows the Pi server address at the bottom left. Tap the weather
+The idle screen shows the ESP32's current LAN IP above the Pi server address at
+the bottom left; the ESP32 address updates after Wi-Fi reconnects. Tap the weather
 row to view the provider credit in the status bar. Weather data is provided by
 [Open-Meteo](https://open-meteo.com/) under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/);
 the display rounds temperatures and maps weather codes to concise labels/icons.

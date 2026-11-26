@@ -45,5 +45,6 @@ bool begin(const char *ssid, const char *password, uint32_t timeoutMs) {
 }
 
 bool connected() { return WiFi.status() == WL_CONNECTED; }
+String localAddress() { return connected() ? WiFi.localIP().toString() : String(); }
 
 }  // namespace net

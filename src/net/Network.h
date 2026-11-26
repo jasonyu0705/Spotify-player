@@ -11,5 +11,7 @@ namespace net {
 bool begin(const char *ssid, const char *password, uint32_t timeoutMs);
 
 bool connected();
+// Current DHCP address, or an empty string while disconnected.
+String localAddress();
 
 }  // namespace net
