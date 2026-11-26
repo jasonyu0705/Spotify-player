@@ -47,15 +47,15 @@ def configure(server_url, secrets_path, env_path):
     token = read_define(original, "PI_API_TOKEN")
     if len(token) < 24 or token.startswith("your-") or not token.isascii():
         token = secrets.token_urlsafe(32)
-    values.update(PI_API_TOKEN=token, PI_PORT=str(port), PI_BIND="0.0.0.0")
-    # Keep a user's optional weather settings when regenerating credentials.
+    values.update(PI_API_TOKEN=token, PI_PORT=str(port), PI_BIND="0.0.0.0", SPOTIFY_POLL_INTERVAL="1")
+    # Keep optional weather/polling settings when regenerating credentials.
     if env_path.exists():
         for line in env_path.read_text().splitlines():
             key, separator, value = line.strip().partition("=")
-            if separator and key.startswith("WEATHER_") and key.replace("_", "").isalnum():
+            if separator and (key.startswith("WEATHER_") or key == "SPOTIFY_POLL_INTERVAL") and key.replace("_", "").isalnum():
                 parts = shlex.split(value, comments=True)
                 if len(parts) != 1:
-                    raise ValueError("Invalid weather environment value for " + key)
+                    raise ValueError("Invalid environment value for " + key)
                 values[key] = parts[0]
     updates = {"PI_SERVER_URL": server_url.rstrip("/"), "PI_API_TOKEN": token}
     updated = original

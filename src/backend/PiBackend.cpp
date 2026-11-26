@@ -14,6 +14,7 @@ BackendStatus parseStatus(const char *status) {
   if (strcmp(status, "not_authorized") == 0) return BackendStatus::NotAuthorized;
   if (strcmp(status, "rate_limited") == 0) return BackendStatus::RateLimited;
   if (strcmp(status, "unsupported") == 0) return BackendStatus::Unsupported;
+  if (strcmp(status, "polling_disabled") == 0) return BackendStatus::PollingDisabled;
   return BackendStatus::NetworkError;
 }
 }  // namespace
@@ -85,6 +86,8 @@ BackendStatus PiBackend::getNowPlaying(NowPlaying &out) {
   BackendStatus status = request("GET", "/state", "", body);
   JsonDocument doc;
   if (body.isEmpty() || deserializeJson(doc, body) || (doc["version"] | 0) != 1) return status;
+  idleInfo_.pollingSupported = doc["polling"]["enabled"].is<bool>();
+  idleInfo_.pollingEnabled = doc["polling"]["enabled"] | true;
   JsonObjectConst weather = doc["weather"];
   idleInfo_.weatherSupported = !weather.isNull();
   idleInfo_.weatherStatus = weather["status"] | "unavailable";
@@ -188,4 +191,9 @@ BackendStatus PiBackend::setShuffle(bool on) {
 }
 BackendStatus PiBackend::setRepeat(RepeatMode mode) {
   return command(String("{\"command\":\"repeat\",\"value\":\"") + spotifyRepeatState(mode) + "\"}");
+}
+
+BackendStatus PiBackend::setPolling(bool enabled) {
+  String body;
+  return request("POST", "/polling", String("{\"enabled\":") + (enabled ? "true}" : "false}"), body);
 }

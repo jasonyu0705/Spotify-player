@@ -43,6 +43,7 @@ BackendStatus BackendWorker::execute(const CommandMsg &cmd) {
     case CommandType::Previous: return backend_.previous();
     case CommandType::SetShuffle: return backend_.setShuffle(cmd.value != 0);
     case CommandType::SetRepeat: return backend_.setRepeat(static_cast<RepeatMode>(cmd.value));
+    case CommandType::SetPolling: return backend_.setPolling(cmd.value != 0);
   }
   return BackendStatus::Unsupported;
 }
@@ -73,7 +74,8 @@ void BackendWorker::run() {
 
     BackendStatus status = backend_.getNowPlaying(np);
     uint32_t interval = pollIntervalMs_;
-    if (status == BackendStatus::NothingPlaying || status == BackendStatus::NoActiveDevice) {
+    if (status == BackendStatus::NothingPlaying || status == BackendStatus::NoActiveDevice ||
+        status == BackendStatus::PollingDisabled) {
       interval = max(interval, IDLE_POLL_MS);
     } else if (status == BackendStatus::NetworkError) {
       interval = max(interval, NETWORK_RETRY_MS);

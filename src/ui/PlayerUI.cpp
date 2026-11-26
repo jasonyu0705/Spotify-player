@@ -15,6 +15,8 @@ namespace {
 constexpr uint32_t NOTICE_MS = 2500;
 constexpr uint32_t PROGRESS_JUMP_MS = 2000;  // larger gap than this means a seek, not drift
 constexpr uint32_t PI_REPLY_FRESH_MS = 45000;  // longer than the maximum command wait
+constexpr int16_t UPDATES_W = 96;
+constexpr int16_t UPDATES_X = W - MARGIN - UPDATES_W;
 
 bool piIsOnline(const IdleInfo &info) {
   return net::connected() && info.piOnline && uint32_t(millis() - info.lastPiReplyMs) < PI_REPLY_FRESH_MS;
@@ -93,6 +95,7 @@ const char *statusDetail(BackendStatus status) {
     case BackendStatus::NetworkError: return "Check WiFi and the server address";
     case BackendStatus::RateLimited: return "Waiting before trying again";
     case BackendStatus::Unsupported: return "This device can't do that";
+    case BackendStatus::PollingDisabled: return "Tap Spotify OFF to enable Spotify updates";
     default: return "";
   }
 }
@@ -108,6 +111,7 @@ const char *statusTitle(BackendStatus status) {
     case BackendStatus::NetworkError: return "Can't connect";
     case BackendStatus::RateLimited: return "Too many requests";
     case BackendStatus::Unsupported: return "Not supported";
+    case BackendStatus::PollingDisabled: return "Spotify updates off";
   }
   return "Unknown error";
 }
@@ -131,6 +135,13 @@ void PlayerUI::setBrightness(uint8_t percent) {
   if (brightness_ == percent) return;
   brightness_ = percent;
   if (visible_ && mode_ != Mode::None) drawBrightnessButton();
+}
+
+void PlayerUI::setIdleInfo(const IdleInfo &info) {
+  const bool changed = idleInfo_.pollingSupported != info.pollingSupported ||
+                       idleInfo_.pollingEnabled != info.pollingEnabled;
+  idleInfo_ = info;
+  if (changed && visible_ && mode_ != Mode::None) drawStatusBar();
 }
 
 void PlayerUI::showMessage(const char *title, const char *detail) {
@@ -351,7 +362,10 @@ void PlayerUI::drawStatusBar() {
     tft_.setTextColor(TEXT_SECONDARY, BG);
     String prefix = shown_.isLastPlayed ? "Last played" : shown_.isPlaying ? "Playing" : "Paused";
     String label = prefix + (shown_.deviceName.isEmpty() ? "" : " on " + toDisplayText(shown_.deviceName));
-    String device = fitText(tft_, label, 2, W - 120);
+    const int deviceWidth = idleInfo_.pollingSupported
+                                ? UPDATES_X - 12 - (MARGIN + 12)
+                                : W - 120;
+    String device = fitText(tft_, label, 2, deviceWidth);
     tft_.drawString(device, MARGIN + 12, STATUS_H / 2, 2);
   } else if (mode_ == Mode::Clock) {
     const bool wifi = net::connected();
@@ -364,9 +378,18 @@ void PlayerUI::drawStatusBar() {
       tft_.drawString(pi ? "Pi online" : idleInfo_.piAuthError ? "Pi auth error" : "Pi offline", 173, STATUS_H / 2, 2);
     }
   }
-  tft_.setTextDatum(MR_DATUM);
-  tft_.setTextColor(ICON_DISABLED, BG);
-  tft_.drawString(backendName_, W - MARGIN, STATUS_H / 2, 2);
+  if (idleInfo_.usesPi && idleInfo_.pollingSupported) {
+    const uint16_t color = idleInfo_.pollingEnabled ? ACCENT : ERROR_RED;
+    tft_.fillRoundRect(UPDATES_X, 2, UPDATES_W, STATUS_H - 4, 5, color);
+    tft_.setTextDatum(MC_DATUM);
+    tft_.setTextColor(BG, color);
+    tft_.drawString(idleInfo_.pollingEnabled ? "Spotify ON" : "Spotify OFF",
+                    UPDATES_X + UPDATES_W / 2, STATUS_H / 2, 2);
+  } else {
+    tft_.setTextDatum(MR_DATUM);
+    tft_.setTextColor(ICON_DISABLED, BG);
+    tft_.drawString(backendName_, W - MARGIN, STATUS_H / 2, 2);
+  }
 }
 
 void PlayerUI::drawArt() {
@@ -505,6 +528,10 @@ void PlayerUI::drawBrightnessButton() {
 
 UiAction PlayerUI::actionAt(uint16_t x, uint16_t y) const {
   if (!visible_) return UiAction::None;
+  if (mode_ != Mode::None && !noticeUntil_ && idleInfo_.usesPi && idleInfo_.pollingSupported &&
+      piIsOnline(idleInfo_) && x >= UPDATES_X - 4 && x < W - MARGIN + 4 && y < STATUS_H) {
+    return UiAction::TogglePolling;
+  }
 
   const bool inPanel = x >= PANEL_X0 - 12;
   const int slot = constrain((int(x) - PANEL_X0) / SLOT_W, 0, 2);

@@ -48,7 +48,9 @@ chmod 600 spotify.env
 python3 spotify_bridge.py
 ```
 
-Start Spotify on your phone/computer. Logs should show `Playback: ok` and
+Turn on the ESP32, then start Spotify on your phone/computer. The bridge waits
+for its first authenticated display check-in before contacting Spotify.
+Logs should show `Playback: ok` and
 `Cached artwork`. If no device has a track loaded, `nothing_playing` is normal.
 The service listens on port **8765** by default.
 
@@ -141,13 +143,15 @@ The existing clock and photo album continue working independently.
 
 ### Update an existing Pi installation
 
-From the project root in a **Mac terminal**, copy both Python files:
+From the project root in a **Mac terminal**, copy the Python files:
 
 ```bash
-scp pi/spotify_bridge.py pi/weather.py jasonyu0705@10.0.0.248:~/projects/Spotify_ESP/pi/
+scp pi/spotify_bridge.py pi/weather.py pi/polling.py jasonyu0705@10.0.0.248:~/projects/Spotify_ESP/pi/
 ```
 
-Then, in the **Pi SSH session**, restart the systemd service:
+If the running bridge is already rate limited, first follow the cooldown
+migration instructions below before restarting. Otherwise, in the **Pi SSH
+session**, restart the systemd service:
 
 ```bash
 systemctl --user restart spotify-bridge.service
@@ -162,11 +166,64 @@ An older Pi service still works for Spotify; the new UI prompts to update the
 bridge when the weather field is missing. The direct `controller` environment
 shows Wi-Fi status; weather requires `controller-pi`.
 
+## Stop Spotify polling when the display is off
+
+The Pi service can stay running all day. Spotify polling starts only after the
+ESP32 requests authenticated `/state` data. If no display request arrives for
+**60 seconds**, the Pi stops Spotify polling and artwork retries. It waits for
+the display again after a Pi restart, too. Turning the display back on wakes the
+poller promptly, subject to an existing Spotify cooldown. There is no extra
+heartbeat request: the ESP32 already reads this cache regularly, including when
+the clock or photo frame is showing. Wi-Fi loss also counts as an absent display.
+One Spotify request already in progress may finish when the timeout occurs.
+
+The manual switch defaults to **ON**. Leave it there to use only automatic
+display detection. In Pi mode, tap the green **Spotify ON** button at the top
+right of the clock or player screen to switch updates off. Tap the red
+**Spotify OFF** button to enable them again. The switch is shown only when the bridge supports it; flash the updated
+`controller-pi` firmware to add it. It works independently of Spotify playback:
+switching updates off does **not** pause your music. The display shows the clock
+and weather while updates are off, and continues checking in with the Pi.
+
+The manual setting is saved in `spotify.tokens.polling.json` beside the token
+file. If you manually turn it off, it remains off after restarting either device
+until you turn it on again. Automatic absence detection does not change this
+setting. Neither control clears or shortens a Spotify cooldown. Weather continues
+on its own schedule and the Pi's other services, such as file sharing, keep running.
+
+The same controls are available in your **Pi SSH terminal**, without restarting
+the service or displaying any credentials:
+
+```bash
+cd ~/projects/Spotify_ESP/pi
+python3 polling.py status
+python3 polling.py off
+python3 polling.py on
+```
+
+Run whichever command you need. `on` enables updates but still waits if the ESP32
+is off. These commands connect only to the running service on this Pi and do not
+renew the display check-in. They report whether polling is enabled and whether a
+display has checked in recently. An unreadable saved switch preference defaults
+to OFF; use `python3 polling.py on` to save a fresh preference.
+
 ## Behavior and local API
 
-The Pi polls once a second during active/paused playback, once every three seconds
-when nothing is loaded, and backs off on connection/authentication errors. It
-honors Spotify's `Retry-After` response before sending more polls or commands.
+When updates are enabled and the display is present, the Pi polls once a second
+during active playback, once every **5 seconds while paused**, and once every
+**10 seconds when nothing is loaded**. Controls still
+refresh playback promptly after a successful command. Starting or resuming music
+on another device may take up to the idle/paused polling interval to appear,
+plus the ESP32's next local cache read. Failed authorization and unsupported
+playback back off to at least one minute instead of polling every second.
+
+Spotify's `Retry-After` response blocks both polling and commands until the
+cooldown ends. The deadline is saved in `spotify.tokens.ratelimit.json` beside
+the token file and restored after a restart. Without a valid retry header, the
+bridge uses increasing waits, starting at one minute, or 15 minutes for an
+explicit `QUOTA_EXCEEDED` error. Successful API responses clear the expired
+cooldown. These changes reduce background traffic; they cannot guarantee that
+one-second active polling will always fit Spotify's app/account limits.
 Access tokens refresh automatically; any rotated refresh token is saved in
 `spotify.tokens.json`. An expired/revoked refresh token needs a new login.
 See Spotify's [rate limits](https://developer.spotify.com/documentation/web-api/concepts/rate-limits)
@@ -183,6 +240,8 @@ All endpoints except health require `Authorization: Bearer <PI_API_TOKEN>`:
 | --- | --- |
 | `GET /health` | Service reachability and API version; no Spotify request |
 | `GET /state` | Cached status and display metadata; no Spotify request |
+| `GET /polling` | Manual setting and display presence; does not renew presence |
+| `POST /polling` | JSON `{"enabled":false}` or `{"enabled":true}`; saves manual setting |
 | `GET /art/<hash>.jpg` | Cached JPEG only; no outbound fetch |
 | `POST /command` | JSON `{"command":"play"}`; also pause, next, previous |
 | `POST /command` | `{"command":"shuffle","value":true}` |
@@ -190,11 +249,51 @@ All endpoints except health require `Authorization: Bearer <PI_API_TOKEN>`:
 
 State and command responses use `version: 1` and a string status: `ok`,
 `nothing_playing`, `no_active_device`, `not_authorized`, `network_error`,
-`rate_limited`, or `unsupported`. Cached progress advances using the Pi's monotonic
+`rate_limited`, `unsupported`, or `polling_disabled`. Cached progress advances using the Pi's monotonic
 clock. Successful commands refresh the cache before replying. Reads continue to
 work during Spotify requests; playback older than 30 seconds is reported as an
 error rather than displayed indefinitely as current.
+When rate limited, `/state` also includes `retry_after_seconds` and
+`rate_limit_reason`; reading them never triggers another Spotify request.
+It also includes `polling` with `enabled`, `active`, `display_online`, `reason`,
+and `display_timeout_seconds`. An inactive poller returns `polling_disabled` and
+no current playback, while still including weather and any cooldown diagnostics.
+`active` describes the display/manual gate; a Spotify cooldown can still block
+requests. An authenticated `/state` read renews display presence, including reads
+from diagnostic clients. Use authenticated `GET /polling` for diagnostics that
+should not keep polling awake. `GET /health` and artwork reads do not renew it.
+Authenticated `POST /polling` with `{"enabled": true}` or `{"enabled": false}`
+changes the persisted preference and returns the new polling fields. Requests
+without authentication or with a non-boolean setting are rejected. Playback
+commands are blocked while polling is disabled; switching the setting itself
+never calls Spotify.
+
+### Updating a bridge that is already rate limited
+
+The older bridge stored its cooldown only in memory. Read its most recent
+rate-limit log before restarting it:
+
+```bash
+sudo journalctl _SYSTEMD_USER_UNIT=spotify-bridge.service _UID=1000 --grep='Spotify rate limited' -n 5 --no-pager
+```
+
+Add the logged wait in seconds to the log timestamp to get the retry deadline.
+After copying the updated `pi/spotify_bridge.py` from the Mac, record that
+deadline on the Pi before restarting. For example, a wait of 17,354 seconds
+at 10:44:30 AM Pacific on November 26, 2026 ends at 3:33:44 PM:
+
+```bash
+cd ~/projects/Spotify_ESP/pi
+python3 spotify_bridge.py --record-cooldown-until '2026-11-26T15:33:44-08:00' &&
+systemctl --user restart spotify-bridge.service
+```
+
+Use the actual deadline from the latest log. Recording it makes no Spotify
+request and does not start another HTTP server. It cannot shorten a longer
+deadline already saved. The new service automatically retries after the wait;
+repeated restarts or ESP32 resets do not clear Spotify's limit. This update
+changes only the Pi service, so the ESP32 does not need reflashing.
 
 Optional `spotify.env` settings: `PI_BIND` (default `0.0.0.0`), `PI_PORT` (8765),
-`SPOTIFY_POLL_INTERVAL` (1–60 seconds), and `SPOTIFY_TOKEN_FILE` (default beside the
+`SPOTIFY_POLL_INTERVAL` (active playback, default 1 second, range 1–60), and `SPOTIFY_TOKEN_FILE` (default beside the
 env file). Keep the API token and these files private.

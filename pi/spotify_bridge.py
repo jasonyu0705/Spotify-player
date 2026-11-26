@@ -4,11 +4,14 @@
 import argparse
 import base64
 from collections import OrderedDict
+from datetime import datetime
 import hashlib
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.client import HTTPException
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import shlex
@@ -24,6 +27,7 @@ from weather import WeatherCache
 LOG = logging.getLogger("spotify-bridge")
 MAX_ART_BYTES = 64 * 1024
 MAX_JSON_BYTES = 512 * 1024
+DEFAULT_POLL_INTERVAL = 1.0
 
 
 def load_env(path):
@@ -79,6 +83,11 @@ class SpotifyClient:
         self.access_token = ""
         self.expires_at = 0
         self.retry_at = 0
+        self.retry_at_utc = 0
+        self.rate_limit_failures = 0
+        self.rate_limit_reason = ""
+        self.cooldown_file = self.token_file.with_suffix(".ratelimit.json")
+        self.app_fingerprint = hashlib.sha256(client_id.encode()).hexdigest()
         self.auth_retry_at = 0
         try:
             saved = json.loads(self.token_file.read_text())
@@ -86,6 +95,82 @@ class SpotifyClient:
                 self.refresh_token = saved.get("refresh_token") or refresh_token
         except FileNotFoundError:
             pass
+        try:
+            saved = json.loads(self.cooldown_file.read_text())
+            if saved.get("app") == self.app_fingerprint:
+                deadline = float(saved["retry_at_utc"])
+                if not math.isfinite(deadline):
+                    raise ValueError("Invalid cooldown deadline")
+                self.retry_at_utc = deadline
+                self.rate_limit_failures = max(0, min(12, int(saved.get("failures", 1))))
+                self.rate_limit_reason = str(saved.get("reason", "RATE_LIMITED"))[:64]
+                if self.cooldown_remaining():
+                    LOG.warning("Resuming Spotify cooldown (%d seconds remaining)", self.cooldown_remaining())
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            # A damaged state file must not turn a restart into rapid retries.
+            self.retry_at_utc = time.time() + 900
+            self.rate_limit_reason = "COOLDOWN_STATE_UNREADABLE"
+            LOG.warning("Cannot read Spotify cooldown state; waiting 15 minutes")
+
+    def cooldown_remaining(self):
+        # A live process uses monotonic time. Restored cooldowns use wall time
+        # so the remaining wait survives a restart or reboot.
+        remaining = self.retry_at - time.monotonic() if self.retry_at else self.retry_at_utc - time.time()
+        return max(0, math.ceil(remaining))
+
+    def _save_cooldown(self):
+        write_private_json(self.cooldown_file, {"version": 1, "app": self.app_fingerprint,
+                           "retry_at_utc": self.retry_at_utc, "failures": self.rate_limit_failures,
+                           "reason": self.rate_limit_reason})
+
+    def record_cooldown_until(self, deadline):
+        """Migrate an older bridge's logged deadline without calling Spotify."""
+        if not math.isfinite(deadline):
+            raise ValueError("Invalid cooldown deadline")
+        self.retry_at_utc = max(self.retry_at_utc, deadline)
+        self.retry_at = time.monotonic() + max(0, self.retry_at_utc - time.time())
+        self.rate_limit_failures = max(1, self.rate_limit_failures)
+        self.rate_limit_reason = self.rate_limit_reason or "RATE_LIMITED"
+        self._save_cooldown()
+
+    def _rate_limited(self, headers, body):
+        headers = headers or {}
+        try:
+            error = json.loads(body).get("error", {})
+            quota_exceeded = isinstance(error, dict) and error.get("reason") == "QUOTA_EXCEEDED"
+        except (ValueError, TypeError, AttributeError):
+            quota_exceeded = False
+        quota_exceeded = quota_exceeded or self.rate_limit_reason == "QUOTA_EXCEEDED"
+        self.rate_limit_reason = "QUOTA_EXCEEDED" if quota_exceeded else "RATE_LIMITED"
+        base = 900 if quota_exceeded else 60
+        fallback = min(3600, base * (2 ** min(self.rate_limit_failures, 6)))
+        try:
+            requested = float(headers.get("Retry-After", ""))
+            if not math.isfinite(requested) or requested < 0:
+                raise ValueError("Invalid retry delay")
+            delay = max(1, math.ceil(requested))
+        except (ValueError, TypeError):
+            delay = fallback
+        self.rate_limit_failures += 1
+        self.retry_at = time.monotonic() + delay
+        self.retry_at_utc = time.time() + delay
+        try:
+            self._save_cooldown()
+        except OSError:
+            LOG.error("Could not save Spotify cooldown; avoid restarting until it expires")
+        LOG.warning("Spotify rate limited; waiting %d seconds (%s)", delay, self.rate_limit_reason)
+
+    def _clear_cooldown(self):
+        had_cooldown = bool(self.retry_at_utc or self.rate_limit_failures)
+        self.retry_at = self.retry_at_utc = self.rate_limit_failures = 0
+        self.rate_limit_reason = ""
+        if had_cooldown:
+            try:
+                self.cooldown_file.unlink(missing_ok=True)
+            except OSError:
+                LOG.warning("Could not remove expired Spotify cooldown file")
 
     def _request(self, method, url, authorization, data=None):
         headers = {"Authorization": authorization, "User-Agent": "SpotifyESP-Pi/1"}
@@ -97,19 +182,21 @@ class SpotifyClient:
                 body = response.read(MAX_JSON_BYTES + 1)
                 if len(body) > MAX_JSON_BYTES:
                     raise SpotifyError("network_error")
-                return response.status, json.loads(body) if body else None
+                parsed = json.loads(body) if body else None
+                if url.startswith("https://api.spotify.com/"):
+                    self._clear_cooldown()
+                return response.status, parsed
         except urllib.error.HTTPError as error:
             if error.code == 429:
                 try:
-                    delay = max(1, int(error.headers.get("Retry-After", "5")))
-                except ValueError:
-                    delay = 5
-                self.retry_at = time.monotonic() + delay
-                LOG.warning("Spotify rate limited; waiting %s seconds", delay)
+                    error_body = error.read(8192)
+                except (OSError, HTTPException):
+                    error_body = b""
+                self._rate_limited(error.headers, error_body)
             code = error.code
             error.close()
             return code, None
-        except (OSError, urllib.error.URLError, ValueError) as error:
+        except (OSError, urllib.error.URLError, HTTPException, ValueError) as error:
             LOG.warning("Spotify request failed (%s)", type(error).__name__)
             raise SpotifyError("network_error") from error
 
@@ -139,7 +226,7 @@ class SpotifyClient:
             self.refresh_token = rotated
 
     def call(self, method, path):
-        if time.monotonic() < self.retry_at:
+        if self.cooldown_remaining():
             raise SpotifyError("rate_limited")
         if not self.access_token or time.monotonic() >= self.expires_at:
             self._refresh()
@@ -199,14 +286,30 @@ def command_request(command, value=None):
 
 
 class Bridge:
-    def __init__(self, spotify, poll_interval=1.0, weather=None):
+    def __init__(self, spotify, poll_interval=DEFAULT_POLL_INTERVAL, weather=None, polling_file=None):
         self.spotify = spotify
         self.weather = weather
         self.poll_interval = poll_interval
         self.spotify_lock = threading.Lock()
         self.state_lock = threading.Lock()
         self.stop = threading.Event()
+        self.poll_wakeup = threading.Event()
         self.art_wakeup = threading.Event()
+        self.display_timeout = 60
+        self.last_display_seen = None
+        self.polling_enabled = True
+        self.polling_file = Path(polling_file) if polling_file else None
+        if self.polling_file:
+            try:
+                saved = json.loads(self.polling_file.read_text())
+                if not isinstance(saved.get("enabled"), bool):
+                    raise ValueError("Invalid polling preference")
+                self.polling_enabled = saved["enabled"]
+            except FileNotFoundError:
+                pass
+            except (OSError, ValueError, TypeError, AttributeError):
+                self.polling_enabled = False
+                LOG.warning("Cannot read polling preference; Spotify updates disabled until enabled manually")
         self.status = "network_error"
         self.state = None
         self.observed_at = 0
@@ -214,10 +317,53 @@ class Bridge:
         self.art_cache = OrderedDict()
         self.threads = []
 
+    def _polling_snapshot_locked(self):
+        online = self.last_display_seen is not None and time.monotonic() - self.last_display_seen < self.display_timeout
+        active = self.polling_enabled and online
+        return {"enabled": self.polling_enabled, "active": active, "display_online": online,
+                "reason": "manual_off" if not self.polling_enabled else "enabled" if online else "display_offline",
+                "display_timeout_seconds": self.display_timeout}
+
+    def polling_snapshot(self):
+        with self.state_lock:
+            return self._polling_snapshot_locked()
+
+    def display_seen(self):
+        # Authenticated /state reads are the check-in. Health checks, artwork,
+        # and terminal polling controls never keep an absent display awake.
+        with self.state_lock:
+            was_active = self._polling_snapshot_locked()["active"]
+            self.last_display_seen = time.monotonic()
+            active = self.polling_enabled
+        if active and not was_active:
+            LOG.info("Display connected; Spotify polling may resume")
+            self.poll_wakeup.set()
+
+    def set_polling(self, enabled):
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be a boolean")
+        # Finish an in-flight Spotify request before acknowledging OFF. Save the
+        # preference before changing it, so a failed write isn't reported as OK.
+        with self.spotify_lock:
+            if self.polling_file:
+                write_private_json(self.polling_file, {"enabled": enabled})
+            with self.state_lock:
+                self.polling_enabled = enabled
+                self.state = None
+                self.desired_art = ""
+                self.status = "network_error" if enabled else "polling_disabled"
+            self.art_wakeup.set()
+        LOG.info("Spotify updates manually %s", "enabled" if enabled else "disabled")
+        self.poll_wakeup.set()
+        return self.polling_snapshot()
+
     def snapshot(self):
         with self.state_lock:
+            polling = self._polling_snapshot_locked()
             status = self.status
             state = dict(self.state) if self.state else None
+            if not polling["active"]:
+                status, state = "polling_disabled", None
             age = max(0, time.monotonic() - self.observed_at)
             if status == "ok" and age > 30:
                 status, state = "network_error", None
@@ -226,10 +372,12 @@ class Bridge:
                     state["progress_ms"] = min(state["duration_ms"], state["progress_ms"] + int(age * 1000))
                 path = art_path(self.desired_art)
                 state["art_path"] = path if path in self.art_cache else ""
-            result = {"version": 1, "status": status, "now_playing": state}
+            result = {"version": 1, "status": status, "now_playing": state, "polling": polling}
         # Weather uses a separate lock/thread and is present even when Spotify
         # reports idle, authorization errors, or unsupported playback.
         result["weather"] = self.weather.snapshot() if self.weather else {"status": "not_configured"}
+        result["retry_after_seconds"] = self.spotify.cooldown_remaining()
+        result["rate_limit_reason"] = self.spotify.rate_limit_reason if result["retry_after_seconds"] else ""
         return result
 
     def _poll_locked(self):
@@ -259,11 +407,20 @@ class Bridge:
 
     def poll_once(self):
         with self.spotify_lock:
+            if not self.polling_snapshot()["active"]:
+                with self.state_lock:
+                    if self.status != "polling_disabled":
+                        LOG.info("Spotify polling suspended: %s", self._polling_snapshot_locked()["reason"])
+                    self.status, self.state, self.desired_art = "polling_disabled", None, ""
+                self.art_wakeup.set()
+                return
             self._poll_locked()
 
     def command(self, command, value=None):
         method, path = command_request(command, value)
         with self.spotify_lock:
+            if not self.polling_snapshot()["active"]:
+                return "polling_disabled"
             try:
                 code, _ = self.spotify.call(method, path)
                 status = status_for(code)
@@ -280,26 +437,41 @@ class Bridge:
         with self.state_lock:
             return self.art_cache.get(path)
 
+    def next_poll_delay(self):
+        with self.state_lock:
+            if not self._polling_snapshot_locked()["active"]:
+                return self.display_timeout
+            status = self.status
+            paused = status == "ok" and self.state is not None and not self.state["is_playing"]
+            presence_remaining = max(0, self.display_timeout - (time.monotonic() - self.last_display_seen))
+        delay = max(self.poll_interval, {"nothing_playing": 10, "no_active_device": 10,
+                    "network_error": 15, "not_authorized": 60, "unsupported": 60}.get(status, 0))
+        if paused:
+            delay = max(delay, 5)
+        remaining = self.spotify.cooldown_remaining()
+        if remaining:
+            # Wake occasionally to refresh diagnostics and handle wall-clock
+            # synchronization after boot, without making a Spotify request.
+            delay = max(delay, min(remaining, 60))
+        return min(delay, presence_remaining)
+
     def _poll_loop(self):
         while not self.stop.is_set():
+            self.poll_wakeup.clear()
             try:
                 self.poll_once()
             except (OSError, ValueError, TypeError, KeyError) as error:
                 LOG.error("Playback update failed (%s)", type(error).__name__)
                 with self.state_lock:
                     self.status, self.state = "network_error", None
-            status = self.snapshot()["status"]
-            delay = max(self.poll_interval, {"nothing_playing": 3, "no_active_device": 3,
-                        "network_error": 5, "not_authorized": 30}.get(status, 0))
-            delay = max(delay, self.spotify.retry_at - time.monotonic())
-            self.stop.wait(delay)
+            self.poll_wakeup.wait(self.next_poll_delay())
 
     def _art_loop(self):
         failed_url, failures = "", 0
         while not self.stop.is_set():
             self.art_wakeup.clear()
             with self.state_lock:
-                url = self.desired_art
+                url = self.desired_art if self._polling_snapshot_locked()["active"] else ""
                 cached = art_path(url) in self.art_cache
             if not url or cached:
                 self.art_wakeup.wait(1)
@@ -337,6 +509,7 @@ class Bridge:
 
     def close(self):
         self.stop.set()
+        self.poll_wakeup.set()
         self.art_wakeup.set()
         if self.weather:
             self.weather.close()
@@ -378,7 +551,10 @@ def make_server(address, bridge, api_token):
             if not self.authorized():
                 return
             if self.path == "/state":
+                bridge.display_seen()
                 self.reply(200, bridge.snapshot())
+            elif self.path == "/polling":
+                self.reply(200, {"version": 1, "status": "ok", "polling": bridge.polling_snapshot()})
             elif self.path.startswith("/art/"):
                 image = bridge.cached_art(self.path)
                 self.reply(200, image, "image/jpeg") if image else self.reply(404, {"error": "No artwork"})
@@ -388,7 +564,7 @@ def make_server(address, bridge, api_token):
         def do_POST(self):
             if not self.authorized():
                 return
-            if self.path != "/command":
+            if self.path not in ("/command", "/polling"):
                 self.reply(404, {"error": "Unknown endpoint"})
                 return
             try:
@@ -396,11 +572,20 @@ def make_server(address, bridge, api_token):
                 if not 0 < length <= 1024 or self.headers.get("Transfer-Encoding"):
                     raise ValueError("Invalid body length")
                 data = json.loads(self.rfile.read(length))
+                if self.path == "/polling":
+                    if not isinstance(data, dict) or not isinstance(data.get("enabled"), bool):
+                        raise ValueError("Missing enabled boolean")
+                    polling = bridge.set_polling(data["enabled"])
+                    self.reply(200, {"version": 1, "status": "ok", "polling": polling})
+                    return
                 if not isinstance(data, dict) or not isinstance(data.get("command"), str):
                     raise ValueError("Missing command")
                 command_request(data["command"], data.get("value"))
             except (ValueError, TypeError):
                 self.reply(400, {"error": "Invalid command"})
+                return
+            except OSError:
+                self.reply(500, {"error": "Could not save polling preference"})
                 return
             try:
                 status = bridge.command(data["command"], data.get("value"))
@@ -417,6 +602,8 @@ def make_server(address, bridge, api_token):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env-file", default=str(Path(__file__).with_name("spotify.env")))
+    parser.add_argument("--record-cooldown-until", metavar="ISO_TIMESTAMP",
+                        help="save a logged Spotify retry deadline, then exit without starting the service")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
@@ -425,12 +612,19 @@ def main():
         missing = [name for name in names if not os.environ.get(name) or os.environ[name].startswith("your-")]
         if missing:
             raise ValueError("Missing configuration: " + ", ".join(missing))
-        interval = float(os.environ.get("SPOTIFY_POLL_INTERVAL", "1"))
+        interval = float(os.environ.get("SPOTIFY_POLL_INTERVAL", str(DEFAULT_POLL_INTERVAL)))
         if not 1 <= interval <= 60:
             raise ValueError("SPOTIFY_POLL_INTERVAL must be between 1 and 60 seconds")
         client = SpotifyClient(*(os.environ[name] for name in names[:3]),
                                os.environ.get("SPOTIFY_TOKEN_FILE", str(Path(args.env_file).with_suffix(".tokens.json"))))
-        bridge = Bridge(client, interval, WeatherCache.from_env())
+        if args.record_cooldown_until:
+            deadline = datetime.fromisoformat(args.record_cooldown_until)
+            if deadline.tzinfo is None:
+                raise ValueError("Cooldown timestamp must include a timezone, e.g. -08:00")
+            client.record_cooldown_until(deadline.timestamp())
+            print("Saved Spotify cooldown; %d seconds remaining. Service was not started." % client.cooldown_remaining())
+            return
+        bridge = Bridge(client, interval, WeatherCache.from_env(), client.token_file.with_suffix(".polling.json"))
         address = (os.environ.get("PI_BIND", "0.0.0.0"), int(os.environ.get("PI_PORT", "8765")))
         server = make_server(address, bridge, os.environ["PI_API_TOKEN"])
     except (OSError, ValueError, TypeError) as error:

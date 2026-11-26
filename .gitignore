@@ -18,3 +18,5 @@ include/secrets.h
 # Raspberry Pi service credentials and rotated Spotify tokens
 /pi/spotify.env
 /pi/*.tokens.json
+/pi/*.ratelimit.json
+/pi/*.polling.json

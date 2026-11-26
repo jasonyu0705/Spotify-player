@@ -4,8 +4,10 @@ import copy
 import http.client
 import io
 import json
+import os
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import threading
 import time
@@ -29,6 +31,10 @@ KEY = "test-key-longer-than-twenty-four-characters"
 
 class FakeSpotify:
     retry_at = 0
+    rate_limit_reason = ""
+
+    def cooldown_remaining(self):
+        return max(0, int(self.retry_at - time.monotonic()))
 
     def __init__(self):
         self.body = copy.deepcopy(TRACK)
@@ -53,6 +59,32 @@ class BridgeTests(unittest.TestCase):
     def setUp(self):
         self.spotify = FakeSpotify()
         self.bridge = Bridge(self.spotify)
+        self.bridge.display_seen()
+
+    def test_playing_paused_and_idle_have_independent_poll_intervals(self):
+        self.bridge.poll_once()
+        self.assertEqual(self.bridge.next_poll_delay(), 1)
+        self.spotify.body["is_playing"] = False
+        self.bridge.poll_once()
+        self.assertEqual(self.bridge.next_poll_delay(), 5)
+        self.spotify.body = None
+        self.bridge.poll_once()
+        self.assertEqual(self.bridge.next_poll_delay(), 10)
+
+    def test_cooldown_diagnostics_count_down_without_calling_spotify(self):
+        self.spotify.error = "rate_limited"
+        self.spotify.rate_limit_reason = "QUOTA_EXCEEDED"
+        self.spotify.retry_at = 1000
+        with patch("spotify_bridge.time.monotonic", return_value=100):
+            self.bridge.poll_once()
+            calls = len(self.spotify.calls)
+            self.assertEqual(self.bridge.snapshot()["retry_after_seconds"], 900)
+            self.assertEqual(self.bridge.next_poll_delay(), 60)
+        with patch("spotify_bridge.time.monotonic", return_value=160):
+            snapshot = self.bridge.snapshot()
+            self.assertEqual(snapshot["retry_after_seconds"], 840)
+            self.assertEqual(snapshot["rate_limit_reason"], "QUOTA_EXCEEDED")
+        self.assertEqual(len(self.spotify.calls), calls)
 
     def test_cached_progress_advances_without_calling_spotify(self):
         with patch("spotify_bridge.time.monotonic", return_value=100):
@@ -134,10 +166,148 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(len(self.spotify.calls), calls)
 
 
+class PresenceTests(unittest.TestCase):
+    def setUp(self):
+        self.clock = patch("spotify_bridge.time.monotonic", return_value=100)
+        self.now = self.clock.start()
+        self.addCleanup(self.clock.stop)
+        self.spotify = FakeSpotify()
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.preference = Path(self.temp.name) / "spotify.tokens.polling.json"
+        self.bridge = Bridge(self.spotify, polling_file=self.preference)
+
+    def test_startup_waits_for_display_and_expiry_stops_requests_and_stale_playback(self):
+        self.bridge.poll_once()
+        self.assertEqual(self.spotify.calls, [])
+        self.assertEqual(self.bridge.polling_snapshot()["reason"], "display_offline")
+        self.bridge.display_seen()
+        self.bridge.poll_once()
+        self.assertEqual(self.bridge.snapshot()["status"], "ok")
+        self.now.return_value = 159
+        self.assertTrue(self.bridge.polling_snapshot()["active"])
+        self.now.return_value = 160
+        calls = len(self.spotify.calls)
+        self.bridge.poll_once()
+        self.assertEqual(len(self.spotify.calls), calls)
+        self.assertIsNone(self.bridge.snapshot()["now_playing"])
+        self.assertEqual(self.bridge.snapshot()["status"], "polling_disabled")
+        self.assertEqual(self.bridge.command("next"), "polling_disabled")
+        self.assertEqual(len(self.spotify.calls), calls)
+
+    def test_only_returning_display_wakes_polling_not_each_cache_read(self):
+        self.bridge.display_seen()
+        self.assertTrue(self.bridge.poll_wakeup.is_set())
+        self.bridge.poll_wakeup.clear()
+        self.now.return_value = 130
+        self.bridge.display_seen()
+        self.assertFalse(self.bridge.poll_wakeup.is_set())
+        self.now.return_value = 190
+        self.bridge.display_seen()
+        self.assertTrue(self.bridge.poll_wakeup.is_set())
+        self.assertTrue(self.bridge.polling_snapshot()["active"])
+        self.assertEqual(self.spotify.calls, [])
+
+    def test_background_poller_wakes_on_return_and_stops_when_presence_expires(self):
+        completed = threading.Event()
+        poll_once = self.bridge.poll_once
+
+        def observed_poll():
+            poll_once()
+            completed.set()
+
+        self.bridge.poll_once = observed_poll
+        thread = threading.Thread(target=self.bridge._poll_loop, daemon=True)
+        thread.start()
+        try:
+            self.assertTrue(completed.wait(1))
+            self.assertEqual(self.spotify.calls, [])
+            completed.clear()
+            self.bridge.display_seen()
+            self.assertTrue(completed.wait(1))
+            self.assertEqual(len(self.spotify.calls), 1)
+            completed.clear()
+            self.now.return_value = 160
+            self.bridge.poll_wakeup.set()  # reach the presence deadline without a real minute's wait
+            self.assertTrue(completed.wait(1))
+            self.assertEqual(len(self.spotify.calls), 1)
+            completed.clear()
+            self.bridge.display_seen()
+            self.assertTrue(completed.wait(1))
+            self.assertEqual(len(self.spotify.calls), 2)
+        finally:
+            self.bridge.close()
+            thread.join(1)
+        self.assertFalse(thread.is_alive())
+
+    def test_manual_off_survives_restart_and_display_return_until_enabled(self):
+        self.bridge.display_seen()
+        self.bridge.poll_once()
+        self.bridge.set_polling(False)
+        self.assertEqual(self.preference.stat().st_mode & 0o777, 0o600)
+        restarted = Bridge(self.spotify, polling_file=self.preference)
+        restarted.display_seen()
+        calls = len(self.spotify.calls)
+        restarted.poll_once()
+        self.assertFalse(restarted.polling_snapshot()["active"])
+        self.assertEqual(restarted.polling_snapshot()["reason"], "manual_off")
+        self.assertIsNone(restarted.snapshot()["now_playing"])
+        self.assertEqual(len(self.spotify.calls), calls)
+        restarted.set_polling(True)
+        restarted.poll_once()
+        self.assertEqual(restarted.snapshot()["status"], "ok")
+        self.assertEqual(len(self.spotify.calls), calls + 1)
+
+    def test_enabling_without_display_does_not_start_polling(self):
+        self.bridge.set_polling(False)
+        self.bridge.set_polling(True)
+        self.bridge.poll_once()
+        self.assertEqual(self.spotify.calls, [])
+        self.assertEqual(self.bridge.polling_snapshot()["reason"], "display_offline")
+
+    def test_disabling_does_not_pause_music_or_reset_a_spotify_cooldown(self):
+        self.spotify.retry_at = 1000
+        self.spotify.rate_limit_reason = "RATE_LIMITED"
+        self.bridge.display_seen()
+        self.bridge.set_polling(False)
+        self.assertEqual(self.spotify.calls, [])
+        self.assertEqual(self.bridge.snapshot()["retry_after_seconds"], 900)
+        self.bridge.set_polling(True)
+        self.assertEqual(self.spotify.retry_at, 1000)
+        self.assertEqual(self.spotify.calls, [])
+
+    def test_weather_is_available_when_display_absent_or_manually_disabled(self):
+        class CachedWeather:
+            def snapshot(self):
+                return {"status": "ok", "temperature": 14}
+
+        self.bridge.weather = CachedWeather()
+        for enabled in (True, False):
+            self.bridge.set_polling(enabled)
+            self.bridge.poll_once()
+            self.assertEqual(self.bridge.snapshot()["weather"]["temperature"], 14)
+        self.assertEqual(self.spotify.calls, [])
+
+    def test_failed_preference_save_leaves_existing_setting_unchanged(self):
+        with patch("spotify_bridge.write_private_json", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self.bridge.set_polling(False)
+        self.assertTrue(self.bridge.polling_enabled)
+
+    def test_unreadable_preference_defaults_to_no_requests(self):
+        self.preference.write_text("[]")
+        restarted = Bridge(self.spotify, polling_file=self.preference)
+        restarted.display_seen()
+        restarted.poll_once()
+        self.assertFalse(restarted.polling_enabled)
+        self.assertEqual(self.spotify.calls, [])
+
+
 class HTTPTests(unittest.TestCase):
     def setUp(self):
         self.spotify = FakeSpotify()
         self.bridge = Bridge(self.spotify)
+        self.bridge.display_seen()
         self.bridge.poll_once()
         self.server = make_server(("127.0.0.1", 0), self.bridge, KEY)
         self.thread = threading.Thread(target=self.server.serve_forever)
@@ -199,6 +369,44 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(state["weather"]["temperature"], 14.5)
         self.assertEqual(len(self.spotify.calls), calls)
 
+    def test_only_authenticated_state_reads_renew_display_presence(self):
+        self.bridge.last_display_seen = None
+        for path, key in (("/health", None), ("/state", None), ("/polling", KEY), ("/art/missing.jpg", KEY)):
+            self.request("GET", path, key=key)
+            self.assertFalse(self.bridge.polling_snapshot()["display_online"])
+        self.request("GET", "/state")
+        self.assertTrue(self.bridge.polling_snapshot()["display_online"])
+
+    def test_polling_controls_require_auth_validate_boolean_and_do_not_call_spotify(self):
+        calls = len(self.spotify.calls)
+        self.assertEqual(self.request("POST", "/polling", '{"enabled":false}', key="wrong")[0], 401)
+        self.assertTrue(self.bridge.polling_enabled)
+        for body in ('[]', '{}', '{"enabled":"false"}', '{"enabled":0}'):
+            self.assertEqual(self.request("POST", "/polling", body)[0], 400)
+        code, body = self.request("POST", "/polling", '{"enabled":false}')
+        self.assertEqual(code, 200)
+        self.assertFalse(json.loads(body)["polling"]["enabled"])
+        self.assertEqual(json.loads(self.request("GET", "/state")[1])["status"], "polling_disabled")
+        self.assertEqual(json.loads(self.request("POST", "/command", '{"command":"play"}')[1])["status"],
+                         "polling_disabled")
+        self.assertEqual(len(self.spotify.calls), calls)
+
+    def test_terminal_controls_change_the_running_service_without_renewing_presence(self):
+        self.bridge.last_display_seen = None
+        calls = len(self.spotify.calls)
+        script = str(Path(__file__).resolve().parents[1] / "pi/polling.py")
+        with tempfile.TemporaryDirectory() as directory:
+            env_file = Path(directory) / "spotify.env"
+            env_file.write_text("PI_API_TOKEN=%s\nPI_PORT=%d\n" % (KEY, self.server.server_port))
+            environment = {key: value for key, value in os.environ.items() if key not in ("PI_API_TOKEN", "PI_PORT")}
+            for action, expected in (("off", "OFF"), ("on", "ON"), ("status", "ON")):
+                result = subprocess.run([sys.executable, script, action, "--env-file", str(env_file)],
+                                        env=environment, capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Spotify updates: " + expected, result.stdout)
+        self.assertFalse(self.bridge.polling_snapshot()["display_online"])
+        self.assertEqual(len(self.spotify.calls), calls)
+
 
 class TokenTests(unittest.TestCase):
     def setUp(self):
@@ -206,6 +414,78 @@ class TokenTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.token_file = Path(self.temp.name) / "tokens.json"
         self.client = SpotifyClient("id", "secret", "original-token", self.token_file)
+
+    def test_long_retry_after_survives_restart_and_cannot_be_shortened_by_migration(self):
+        with patch("spotify_bridge.time.monotonic", return_value=100), patch(
+                "spotify_bridge.time.time", return_value=1000):
+            self.client._rate_limited({"Retry-After": "17354"}, b"")
+            self.assertEqual(self.client.cooldown_remaining(), 17354)
+        with patch("spotify_bridge.time.monotonic", return_value=500), patch(
+                "spotify_bridge.time.time", return_value=1100), patch(
+                "spotify_bridge.urllib.request.urlopen") as network:
+            restarted = SpotifyClient("id", "secret", "original-token", self.token_file)
+            self.assertEqual(restarted.cooldown_remaining(), 17254)
+            restarted.record_cooldown_until(1500)
+            self.assertEqual(restarted.cooldown_remaining(), 17254)
+            with self.assertRaises(SpotifyError) as caught:
+                restarted.call("GET", "")
+            self.assertEqual(caught.exception.status, "rate_limited")
+            network.assert_not_called()
+        self.assertEqual(self.client.cooldown_file.stat().st_mode & 0o777, 0o600)
+
+    def test_missing_retry_header_uses_increasing_backoff(self):
+        with patch("spotify_bridge.time.monotonic", return_value=100):
+            self.client._rate_limited({}, b"")
+            self.assertEqual(self.client.cooldown_remaining(), 60)
+        with patch("spotify_bridge.time.monotonic", return_value=161):
+            self.client._rate_limited({"Retry-After": "invalid"}, b"")
+            self.assertEqual(self.client.cooldown_remaining(), 120)
+
+    def test_retry_header_is_honored_even_if_error_body_cannot_be_read(self):
+        class BrokenBody(io.BytesIO):
+            def read(self, *args):
+                raise OSError("connection closed")
+
+        rate_error = urllib.error.HTTPError("https://api.spotify.com", 429, "limited",
+                                           {"Retry-After": "120"}, BrokenBody())
+        with patch("spotify_bridge.time.monotonic", return_value=100), patch(
+                "spotify_bridge.urllib.request.urlopen", side_effect=rate_error):
+            self.assertEqual(self.client._request("GET", "https://api.spotify.com/v1/me/player", "Bearer test")[0], 429)
+            self.assertEqual(self.client.cooldown_remaining(), 120)
+
+    def test_quota_error_without_retry_header_uses_longer_backoff(self):
+        with patch("spotify_bridge.time.monotonic", return_value=100):
+            self.client._rate_limited({}, b'{"error":{"reason":"QUOTA_EXCEEDED"}}')
+            self.assertEqual(self.client.cooldown_remaining(), 900)
+        with patch("spotify_bridge.time.monotonic", return_value=1001):
+            self.client._rate_limited(None, b"")
+            self.assertEqual(self.client.cooldown_remaining(), 1800)
+            self.assertEqual(self.client.rate_limit_reason, "QUOTA_EXCEEDED")
+
+    def test_successful_api_response_clears_expired_cooldown(self):
+        class Reply(io.BytesIO):
+            status = 204
+
+        with patch("spotify_bridge.time.monotonic", return_value=100), patch(
+                "spotify_bridge.time.time", return_value=1000):
+            self.client.record_cooldown_until(1010)
+        self.client.access_token, self.client.expires_at = "valid", 10000
+        with patch("spotify_bridge.time.monotonic", return_value=111), patch(
+                "spotify_bridge.urllib.request.urlopen", return_value=Reply(b"")):
+            self.assertEqual(self.client.call("GET", "")[0], 204)
+            self.assertEqual(self.client.cooldown_remaining(), 0)
+            self.assertEqual(self.client.rate_limit_failures, 0)
+        self.assertFalse(self.client.cooldown_file.exists())
+
+    def test_corrupt_cooldown_file_does_not_trigger_an_immediate_retry(self):
+        self.client.cooldown_file.write_text("invalid JSON")
+        with patch("spotify_bridge.time.time", return_value=1000), patch(
+                "spotify_bridge.urllib.request.urlopen") as network:
+            restarted = SpotifyClient("id", "secret", "original-token", self.token_file)
+            self.assertEqual(restarted.cooldown_remaining(), 900)
+            with self.assertRaises(SpotifyError):
+                restarted.call("PUT", "/play")
+            network.assert_not_called()
 
     def test_refresh_rotation_survives_restart_and_new_seed_overrides_it(self):
         with patch.object(self.client, "_request", side_effect=[
@@ -250,6 +530,23 @@ class TokenTests(unittest.TestCase):
                     self.client.call("GET", "")
                 self.assertEqual(str(caught.exception), "not_authorized")
         self.assertEqual(network.call_count, 1)
+
+
+class CooldownMigrationTests(unittest.TestCase):
+    def test_cli_records_deadline_without_starting_the_http_server(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env_file = Path(directory) / "spotify.env"
+            env_file.write_text("SPOTIFY_CLIENT_ID=id\nSPOTIFY_CLIENT_SECRET=secret\n"
+                                "SPOTIFY_REFRESH_TOKEN=refresh\nPI_API_TOKEN=" + KEY + "\n")
+            environment = {key: value for key, value in os.environ.items()
+                           if not key.startswith(("SPOTIFY_", "PI_", "WEATHER_"))}
+            script = Path(__file__).resolve().parents[1] / "pi/spotify_bridge.py"
+            result = subprocess.run([sys.executable, str(script), "--env-file", str(env_file),
+                                     "--record-cooldown-until", "2099-01-01T00:00:00+00:00"],
+                                    env=environment, capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Saved Spotify cooldown", result.stdout)
+            self.assertTrue(env_file.with_suffix(".tokens.ratelimit.json").exists())
 
 
 if __name__ == "__main__":

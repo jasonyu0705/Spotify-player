@@ -52,6 +52,7 @@ NowPlaying nowPlaying;  // latest state, plus any instant feedback applied local
 BackendStatus lastStatus = BackendStatus::Ok;
 bool havePlayback = false;  // a track has loaded at least once since startup
 bool showingClock = false;
+bool spotifyUpdatesEnabled = true;
 
 // Resistive touch flickers off for a few ms mid-press; treat short gaps as still
 // pressed so one tap doesn't register twice.
@@ -122,8 +123,10 @@ void recalibrateIfRequested() {
 
 void applyUpdate(const BackendWorker::Update &update) {
   ui.setIdleInfo(update.idleInfo);
+  spotifyUpdatesEnabled = update.idleInfo.pollingEnabled;
   bool idle = update.status == BackendStatus::NothingPlaying ||
-              update.status == BackendStatus::NoActiveDevice;
+              update.status == BackendStatus::NoActiveDevice ||
+              update.status == BackendStatus::PollingDisabled;
   if (update.commandFailed) {
     Serial.printf("Command failed: %s\n", statusTitle(update.commandStatus));
     ui.showNotice(statusTitle(update.commandStatus));
@@ -191,6 +194,10 @@ void runAction(UiAction action) {
       backlight.cycle();
       ui.setBrightness(backlight.percent());
       return;
+    case UiAction::TogglePolling:
+      queued = worker.send(Command::SetPolling, !spotifyUpdatesEnabled);
+      if (queued) ui.showNotice("Changing Spotify updates...", false);
+      break;
     case UiAction::PlayPause:
       queued = worker.send(nowPlaying.isPlaying ? Command::Pause : Command::Play);
       break;

@@ -5,7 +5,7 @@
 #include "backend/NowPlaying.h"
 #include "backend/IdleInfo.h"
 
-enum class UiAction { None, PlayPause, Next, Previous, ToggleShuffle, CycleRepeat, CycleBrightness, WeatherInfo };
+enum class UiAction { None, PlayPause, Next, Previous, ToggleShuffle, CycleRepeat, CycleBrightness, WeatherInfo, TogglePolling };
 
 // Draws the now-playing screen and turns taps into actions. Only redraws the parts
 // that changed, so it can be updated every poll without flicker.
@@ -16,7 +16,7 @@ class PlayerUI {
   void begin(const char *backendName);
   void setVisible(bool visible);  // Spotify keeps syncing while the photo screen is open
   void setBrightness(uint8_t percent);
-  void setIdleInfo(const IdleInfo &info) { idleInfo_ = info; }
+  void setIdleInfo(const IdleInfo &info);
 
   // Full-screen message, e.g. "Connecting..." or "Nothing playing".
   void showMessage(const char *title, const char *detail);

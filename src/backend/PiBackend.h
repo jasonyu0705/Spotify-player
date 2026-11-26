@@ -22,6 +22,7 @@ class PiBackend : public PlayerBackend {
   BackendStatus previous() override;
   BackendStatus setShuffle(bool on) override;
   BackendStatus setRepeat(RepeatMode mode) override;
+  BackendStatus setPolling(bool enabled) override;
 
  private:
   BackendStatus request(const char *method, const char *path, const String &payload, String &body);

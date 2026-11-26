@@ -21,4 +21,5 @@ class PlayerBackend {
   virtual BackendStatus previous() = 0;
   virtual BackendStatus setShuffle(bool on) = 0;
   virtual BackendStatus setRepeat(RepeatMode mode) = 0;
+  virtual BackendStatus setPolling(bool enabled) { return BackendStatus::Unsupported; }
 };

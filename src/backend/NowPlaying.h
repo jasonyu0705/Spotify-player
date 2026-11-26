@@ -38,4 +38,5 @@ enum class BackendStatus {
   NetworkError,    // WiFi down, server unreachable, timeout
   RateLimited,     // too many requests; try again later
   Unsupported,     // the device restricts the requested playback action
+  PollingDisabled, // Pi Spotify updates are switched off
 };

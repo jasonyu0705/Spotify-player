@@ -9,6 +9,8 @@ struct IdleInfo {
   bool piAuthError = false;
   uint32_t lastPiReplyMs = 0;
   String piAddress;
+  bool pollingSupported = false;
+  bool pollingEnabled = true;
 
   bool weatherSupported = false;
   bool weatherAvailable = false;

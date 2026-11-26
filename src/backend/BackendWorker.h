@@ -11,7 +11,7 @@
 // state; it never calls the backend directly.
 class BackendWorker {
  public:
-  enum class CommandType : uint8_t { Play, Pause, Next, Previous, SetShuffle, SetRepeat };
+  enum class CommandType : uint8_t { Play, Pause, Next, Previous, SetShuffle, SetRepeat, SetPolling };
 
   struct Update {
     BackendStatus status = BackendStatus::Ok;  // result of the latest poll
