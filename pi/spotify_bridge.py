@@ -19,6 +19,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from weather import WeatherCache
+
 LOG = logging.getLogger("spotify-bridge")
 MAX_ART_BYTES = 64 * 1024
 MAX_JSON_BYTES = 512 * 1024
@@ -197,8 +199,9 @@ def command_request(command, value=None):
 
 
 class Bridge:
-    def __init__(self, spotify, poll_interval=1.0):
+    def __init__(self, spotify, poll_interval=1.0, weather=None):
         self.spotify = spotify
+        self.weather = weather
         self.poll_interval = poll_interval
         self.spotify_lock = threading.Lock()
         self.state_lock = threading.Lock()
@@ -223,7 +226,11 @@ class Bridge:
                     state["progress_ms"] = min(state["duration_ms"], state["progress_ms"] + int(age * 1000))
                 path = art_path(self.desired_art)
                 state["art_path"] = path if path in self.art_cache else ""
-            return {"version": 1, "status": status, "now_playing": state}
+            result = {"version": 1, "status": status, "now_playing": state}
+        # Weather uses a separate lock/thread and is present even when Spotify
+        # reports idle, authorization errors, or unsupported playback.
+        result["weather"] = self.weather.snapshot() if self.weather else {"status": "not_configured"}
+        return result
 
     def _poll_locked(self):
         try:
@@ -321,6 +328,8 @@ class Bridge:
                 self.art_wakeup.wait(delay)
 
     def start(self):
+        if self.weather:
+            self.weather.start()
         for target in (self._poll_loop, self._art_loop):
             thread = threading.Thread(target=target, daemon=True)
             thread.start()
@@ -329,6 +338,8 @@ class Bridge:
     def close(self):
         self.stop.set()
         self.art_wakeup.set()
+        if self.weather:
+            self.weather.close()
 
 
 def make_server(address, bridge, api_token):
@@ -419,7 +430,7 @@ def main():
             raise ValueError("SPOTIFY_POLL_INTERVAL must be between 1 and 60 seconds")
         client = SpotifyClient(*(os.environ[name] for name in names[:3]),
                                os.environ.get("SPOTIFY_TOKEN_FILE", str(Path(args.env_file).with_suffix(".tokens.json"))))
-        bridge = Bridge(client, interval)
+        bridge = Bridge(client, interval, WeatherCache.from_env())
         address = (os.environ.get("PI_BIND", "0.0.0.0"), int(os.environ.get("PI_PORT", "8765")))
         server = make_server(address, bridge, os.environ["PI_API_TOKEN"])
     except (OSError, ValueError, TypeError) as error:

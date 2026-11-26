@@ -4,6 +4,7 @@
 #include "ui/AlbumArtRenderer.h"
 #include "ui/Text.h"
 #include "ui/Theme.h"
+#include "net/Network.h"
 #include <time.h>
 
 using namespace layout;
@@ -13,6 +14,52 @@ namespace {
 
 constexpr uint32_t NOTICE_MS = 2500;
 constexpr uint32_t PROGRESS_JUMP_MS = 2000;  // larger gap than this means a seek, not drift
+constexpr uint32_t PI_REPLY_FRESH_MS = 45000;  // longer than the maximum command wait
+
+bool piIsOnline(const IdleInfo &info) {
+  return net::connected() && info.piOnline && uint32_t(millis() - info.lastPiReplyMs) < PI_REPLY_FRESH_MS;
+}
+
+// A small, code-drawn symbol avoids image downloads and extra bitmap storage.
+void weatherIcon(TFT_eSPI &tft, int x, int y, int code, bool isDay) {
+  const uint16_t sun = rgb565(245, 194, 75);
+  const uint16_t cloud = rgb565(168, 186, 204);
+  const uint16_t rain = rgb565(90, 174, 239);
+  if (code == 0 || code == 1) {
+    tft.fillCircle(x, y, 5, isDay ? sun : cloud);
+    if (!isDay) tft.fillCircle(x + 3, y - 2, 4, BG);
+    else {
+      tft.drawFastVLine(x, y - 10, 3, sun);
+      tft.drawFastVLine(x, y + 8, 3, sun);
+      tft.drawFastHLine(x - 10, y, 3, sun);
+      tft.drawFastHLine(x + 8, y, 3, sun);
+      tft.drawLine(x - 7, y - 7, x - 5, y - 5, sun);
+      tft.drawLine(x + 7, y - 7, x + 5, y - 5, sun);
+      tft.drawLine(x - 7, y + 7, x - 5, y + 5, sun);
+      tft.drawLine(x + 7, y + 7, x + 5, y + 5, sun);
+    }
+    return;
+  }
+  if (code == 2) tft.fillCircle(x + 5, y - 5, 5, sun);
+  tft.fillCircle(x - 5, y, 4, cloud);
+  tft.fillCircle(x, y - 3, 5, cloud);
+  tft.fillCircle(x + 5, y, 4, cloud);
+  tft.fillRoundRect(x - 8, y, 17, 5, 2, cloud);
+  if (code == 45 || code == 48) {
+    tft.drawFastHLine(x - 8, y + 7, 17, cloud);
+    tft.drawFastHLine(x - 6, y + 10, 13, cloud);
+  } else if (code >= 95) {
+    tft.drawLine(x + 1, y + 5, x - 3, y + 9, sun);
+    tft.drawLine(x - 3, y + 9, x + 2, y + 9, sun);
+    tft.drawLine(x + 2, y + 9, x - 1, y + 12, sun);
+  } else if ((code >= 71 && code <= 77) || code == 85 || code == 86) {
+    tft.fillCircle(x - 4, y + 9, 1, cloud);
+    tft.fillCircle(x + 4, y + 9, 1, cloud);
+  } else if (code >= 51) {
+    tft.drawLine(x - 4, y + 7, x - 6, y + 11, rain);
+    tft.drawLine(x + 3, y + 7, x + 1, y + 11, rain);
+  }
+}
 
 // Centers of the three button columns in the right-hand panel.
 int16_t slotCenter(int slot) { return PANEL_X0 + slot * SLOT_W + SLOT_W / 2; }
@@ -116,9 +163,6 @@ void PlayerUI::showClock() {
   tft_.fillScreen(BG);
   drawStatusBar();
   drawClock(true);
-  tft_.setTextDatum(MC_DATUM);
-  tft_.setTextColor(TEXT_TERTIARY, BG);
-  tft_.drawString("Nothing is playing", W / 2, 248, 2);
   drawBrightnessButton();
 }
 
@@ -127,7 +171,10 @@ void PlayerUI::drawClock(bool force) {
   const time_t now = time(nullptr);
   const bool synced = now >= 1700000000;
   const int64_t minute = synced ? int64_t(now) / 60 : -1;
-  if (!force && minute == lastClockMinute_) return;
+  if (!force && minute == lastClockMinute_) {
+    drawIdleDetails(false);
+    return;
+  }
   lastClockMinute_ = minute;
   char clockText[6] = "--:--";
   const char *period = "";
@@ -142,16 +189,77 @@ void PlayerUI::drawClock(bool force) {
     strftime(dateText, sizeof(dateText), "%a, %b %d", &local);
   }
   Serial.printf("Clock: %s %s (%s)\n", clockText, period, dateText);
-  tft_.fillRect(0, 60, W, 174, BG);
+  tft_.fillRect(0, 48, W, 170, BG);
   tft_.setTextPadding(0);
   tft_.setTextDatum(MC_DATUM);
   tft_.setTextColor(TEXT_PRIMARY, BG);
   tft_.setTextSize(2);
-  tft_.drawString(clockText, W / 2, 128, 7);
+  tft_.drawString(clockText, W / 2, 112, 7);
   tft_.setTextSize(1);
   tft_.setTextColor(TEXT_SECONDARY, BG);
-  tft_.drawString(period, W / 2, 189, 2);
-  tft_.drawString(dateText, W / 2, 212, 4);
+  tft_.drawString(period, W / 2, 173, 2);
+  tft_.drawString(dateText, W / 2, 199, 4);
+  drawIdleDetails(force);
+}
+
+void PlayerUI::drawIdleDetails(bool force) {
+  const uint32_t now = millis();
+  if (!force && uint32_t(now - lastIdleCheckMs_) < 500) return;
+  lastIdleCheckMs_ = now;
+  const bool wifi = net::connected();
+  const bool pi = piIsOnline(idleInfo_);
+  const int connection = int(wifi) | (int(pi) << 1) | (int(idleInfo_.piAuthError) << 2) |
+                         (int(idleInfo_.usesPi) << 3);
+  if (force || connection != lastConnectionState_) {
+    lastConnectionState_ = connection;
+    drawStatusBar();
+  }
+
+  String text;
+  String location;
+  int code = -1;
+  bool day = true;
+  if (!idleInfo_.usesPi) text = "Weather available in Pi mode";
+  else if (!idleInfo_.weatherSupported) text = pi ? "Weather: update Pi bridge" : "Weather: waiting for Pi";
+  else if (!idleInfo_.weatherAvailable) {
+    text = idleInfo_.weatherStatus == "loading" ? "Weather: loading..." :
+           idleInfo_.weatherStatus == "not_configured" ? "Weather not configured" : "Weather unavailable";
+    location = idleInfo_.location;
+  } else {
+    char temperature[20];
+    snprintf(temperature, sizeof(temperature), "%.0f %c", idleInfo_.temperature, idleInfo_.fahrenheit ? 'F' : 'C');
+    text = String(temperature) + "  " + idleInfo_.condition;
+    if (idleInfo_.weatherStale || !pi) text += " (cached)";
+    location = idleInfo_.location;
+    code = idleInfo_.weatherCode;
+    day = idleInfo_.isDay;
+  }
+  if (force || text != lastWeatherText_ || location != lastWeatherLocation_ || idleInfo_.piAddress != lastPiAddress_ ||
+      code != lastWeatherCode_ || day != lastWeatherDay_) {
+    lastWeatherText_ = text;
+    lastWeatherLocation_ = location;
+    lastPiAddress_ = idleInfo_.piAddress;
+    lastWeatherCode_ = code;
+    lastWeatherDay_ = day;
+    tft_.fillRect(0, 220, W, 56, BG);
+    tft_.setTextSize(1);
+    tft_.setTextPadding(0);
+    const String fitted = fitText(tft_, toDisplayText(text), 4, W - 2 * MARGIN - 28);
+    const int width = tft_.textWidth(fitted, 4) + (code >= 0 ? 28 : 0);
+    const int left = (W - width) / 2;
+    if (code >= 0) weatherIcon(tft_, left + 10, 237, code, day);
+    tft_.setTextDatum(ML_DATUM);
+    tft_.setTextColor(TEXT_SECONDARY, BG);
+    tft_.drawString(fitted, left + (code >= 0 ? 28 : 0), 237, 4);
+    tft_.setTextDatum(MC_DATUM);
+    tft_.setTextColor(TEXT_TERTIARY, BG);
+    tft_.drawString(fitText(tft_, toDisplayText(location), 2, W - 2 * MARGIN), W / 2, 263, 2);
+    tft_.fillRect(MARGIN, 288, 300, 24, BG);
+    if (idleInfo_.usesPi && !idleInfo_.piAddress.isEmpty()) {
+      tft_.setTextDatum(ML_DATUM);
+      tft_.drawString(fitText(tft_, String("Pi: ") + idleInfo_.piAddress, 2, 300), MARGIN, 300, 2);
+    }
+  }
 }
 
 void PlayerUI::update(const NowPlaying &np) {
@@ -207,9 +315,10 @@ void PlayerUI::tick() {
   drawProgress(false);
 }
 
-void PlayerUI::showNotice(const char *text) {
+void PlayerUI::showNotice(const char *text, bool error) {
   if (!visible_) return;
   notice_ = text;
+  noticeError_ = error;
   noticeUntil_ = millis() + NOTICE_MS;
   drawStatusBar();
 }
@@ -222,7 +331,7 @@ void PlayerUI::drawStatusBar() {
   tft_.setTextDatum(ML_DATUM);
 
   if (noticeUntil_) {
-    tft_.setTextColor(ERROR_RED, BG);
+    tft_.setTextColor(noticeError_ ? ERROR_RED : TEXT_SECONDARY, BG);
     tft_.drawString(fitText(tft_, notice_, 2, W - 2 * MARGIN), MARGIN, STATUS_H / 2, 2);
     return;
   }
@@ -235,6 +344,16 @@ void PlayerUI::drawStatusBar() {
     String label = prefix + (shown_.deviceName.isEmpty() ? "" : " on " + toDisplayText(shown_.deviceName));
     String device = fitText(tft_, label, 2, W - 120);
     tft_.drawString(device, MARGIN + 12, STATUS_H / 2, 2);
+  } else if (mode_ == Mode::Clock) {
+    const bool wifi = net::connected();
+    tft_.fillCircle(MARGIN + 3, STATUS_H / 2, 3, wifi ? ACCENT : ERROR_RED);
+    tft_.setTextColor(TEXT_SECONDARY, BG);
+    tft_.drawString(wifi ? "Wi-Fi online" : "Wi-Fi offline", MARGIN + 12, STATUS_H / 2, 2);
+    if (idleInfo_.usesPi) {
+      const bool pi = piIsOnline(idleInfo_);
+      tft_.fillCircle(161, STATUS_H / 2, 3, pi ? ACCENT : ERROR_RED);
+      tft_.drawString(pi ? "Pi online" : idleInfo_.piAuthError ? "Pi auth error" : "Pi offline", 173, STATUS_H / 2, 2);
+    }
   }
   tft_.setTextDatum(MR_DATUM);
   tft_.setTextColor(ICON_DISABLED, BG);
@@ -382,6 +501,9 @@ UiAction PlayerUI::actionAt(uint16_t x, uint16_t y) const {
   const int slot = constrain((int(x) - PANEL_X0) / SLOT_W, 0, 2);
   if (mode_ != Mode::None && inPanel && y >= SUB_ROW_TOP && y < H && slot == 1) {
     return UiAction::CycleBrightness;
+  }
+  if (mode_ == Mode::Clock && idleInfo_.usesPi && y >= 220 && y < 278) {
+    return UiAction::WeatherInfo;
   }
   if (mode_ != Mode::Player) return UiAction::None;
   const bool onArt = x >= ART_X && x < ART_X + ART_SIZE && y >= ART_Y && y < ART_Y + ART_SIZE;

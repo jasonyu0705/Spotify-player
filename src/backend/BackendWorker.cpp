@@ -86,6 +86,7 @@ void BackendWorker::run() {
 
     xSemaphoreTake(lock_, portMAX_DELAY);
     latest_.status = status;
+    latest_.idleInfo = backend_.idleInfo();
     if (status == BackendStatus::Ok) latest_.nowPlaying = np;
     hasNew_ = true;
     xSemaphoreGive(lock_);

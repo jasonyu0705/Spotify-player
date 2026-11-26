@@ -118,6 +118,21 @@ class BridgeTests(unittest.TestCase):
         self.bridge.art_cache[path] = b"\xff\xd8jpeg"
         self.assertEqual(self.bridge.snapshot()["now_playing"]["art_path"], path)
 
+    def test_weather_survives_a_spotify_error_without_network_requests(self):
+        class CachedWeather:
+            def snapshot(self):
+                return {"status": "ok", "temperature": 14, "temperature_unit": "celsius"}
+
+        self.bridge.weather = CachedWeather()
+        self.spotify.error = "unsupported"
+        self.bridge.poll_once()
+        calls = len(self.spotify.calls)
+        snapshot = self.bridge.snapshot()
+        self.assertEqual(snapshot["status"], "unsupported")
+        self.assertEqual(snapshot["weather"]["temperature"], 14)
+        self.assertIsNone(snapshot["now_playing"])
+        self.assertEqual(len(self.spotify.calls), calls)
+
 
 class HTTPTests(unittest.TestCase):
     def setUp(self):
@@ -167,6 +182,22 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(json.loads(body)["status"], "ok")
         self.assertFalse(self.bridge.snapshot()["now_playing"]["is_playing"])
+
+    def test_authenticated_state_includes_weather_when_spotify_is_unsupported(self):
+        class CachedWeather:
+            def snapshot(self):
+                return {"status": "ok", "temperature": 14.5, "temperature_unit": "celsius"}
+
+        self.bridge.weather = CachedWeather()
+        self.spotify.error = "unsupported"
+        self.bridge.poll_once()
+        calls = len(self.spotify.calls)
+        code, body = self.request("GET", "/state")
+        self.assertEqual(code, 200)
+        state = json.loads(body)
+        self.assertEqual(state["status"], "unsupported")
+        self.assertEqual(state["weather"]["temperature"], 14.5)
+        self.assertEqual(len(self.spotify.calls), calls)
 
 
 class TokenTests(unittest.TestCase):

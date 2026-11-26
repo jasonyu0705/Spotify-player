@@ -16,6 +16,7 @@ class BackendWorker {
   struct Update {
     BackendStatus status = BackendStatus::Ok;  // result of the latest poll
     NowPlaying nowPlaying;                     // valid when status is Ok
+    IdleInfo idleInfo;                         // valid even when Spotify is idle/unavailable
     bool commandFailed = false;                // a command failed since the last update
     BackendStatus commandStatus = BackendStatus::Ok;
   };

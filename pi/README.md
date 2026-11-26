@@ -100,6 +100,67 @@ journalctl --user -u spotify-bridge.service -n 40 --no-pager
 After replacing code or configuration, run
 `systemctl --user restart spotify-bridge.service`.
 
+## Idle weather and connection indicators
+
+The Pi fetches current weather from [Open-Meteo](https://open-meteo.com/en/docs)
+on its own background thread, **once every 15 minutes** by default. The ESP32
+reads this cache in `/state`; its regular reads never trigger weather-provider
+requests. Weather is included even when Spotify is idle, unlinked, or unsupported.
+The display keeps the large clock and adds a small weather icon, temperature,
+conditions, and location. Wi-Fi and Pi connectivity have separate indicators.
+"Pi online" means a recent authenticated Pi response, regardless of Spotify status.
+"Wi-Fi online" means the ESP32 is connected to its router; it is not a separate
+internet-connectivity check.
+
+Defaults are Martinez, California 94553 (`38.01937, -122.13413`), in Celsius.
+This is a fixed configured location, not the Pi's detected location. Optional
+settings in the private `spotify.env` file override the defaults:
+
+```text
+WEATHER_LATITUDE=38.01937
+WEATHER_LONGITUDE=-122.13413
+WEATHER_LOCATION='Martinez, CA'
+WEATHER_UNIT=celsius
+WEATHER_REFRESH_SECONDS=900
+```
+
+Use `WEATHER_REFRESH_SECONDS=3600` for hourly updates. Restart the Pi service
+after changing these values; no ESP32 reflash is needed for location, units, or
+refresh interval changes. The Pi sends the configured coordinates to Open-Meteo.
+The free endpoint requires no API key for this personal, non-commercial project.
+The idle screen shows the Pi server address at the bottom left. Tap the weather
+row to view the provider credit in the status bar. Weather data is provided by
+[Open-Meteo](https://open-meteo.com/) under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/);
+the display rounds temperatures and maps weather codes to concise labels/icons.
+
+Failed requests keep the previous weather with a `(cached)` label and wait until
+the next scheduled refresh. With no successful reading, the display says weather
+is unavailable. Pi connection failures also mark retained weather as cached.
+The existing clock and photo album continue working independently.
+
+### Update an existing Pi installation
+
+From the project root in a **Mac terminal**, copy both Python files:
+
+```bash
+scp pi/spotify_bridge.py pi/weather.py jasonyu0705@10.0.0.248:~/projects/Spotify_ESP/pi/
+```
+
+Then, in the **Pi SSH session**, restart the systemd service:
+
+```bash
+systemctl --user restart spotify-bridge.service
+journalctl --user -u spotify-bridge.service -n 30 --no-pager
+```
+
+If running it manually instead, stop it with Ctrl-C and start
+`python3 ~/projects/Spotify_ESP/pi/spotify_bridge.py` again.
+Look for `Weather updated for Martinez, CA`. Then flash the matching UI from
+the Mac with `pio run -e controller-pi -t upload`.
+An older Pi service still works for Spotify; the new UI prompts to update the
+bridge when the weather field is missing. The direct `controller` environment
+shows Wi-Fi status; weather requires `controller-pi`.
+
 ## Behavior and local API
 
 The Pi polls once a second during active/paused playback, once every three seconds

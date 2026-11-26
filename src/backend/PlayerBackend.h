@@ -1,6 +1,7 @@
 #pragma once
 
 #include "backend/NowPlaying.h"
+#include "backend/IdleInfo.h"
 
 // Playback interface used by the worker, implemented by SpotifyBackend.
 class PlayerBackend {
@@ -11,6 +12,7 @@ class PlayerBackend {
   virtual bool begin() = 0;
 
   virtual BackendStatus getNowPlaying(NowPlaying &out) = 0;
+  virtual IdleInfo idleInfo() const { return {}; }
   virtual bool loadAlbumArt(NowPlaying &out, bool (*cancel)(void *), void *context) { return false; }
 
   virtual BackendStatus play() = 0;

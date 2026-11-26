@@ -14,6 +14,7 @@ class PiBackend : public PlayerBackend {
   const char *name() const override { return "SPOTIFY / PI"; }
   bool begin() override;
   BackendStatus getNowPlaying(NowPlaying &out) override;
+  IdleInfo idleInfo() const override { return idleInfo_; }
   bool loadAlbumArt(NowPlaying &out, bool (*cancel)(void *), void *context) override;
   BackendStatus play() override;
   BackendStatus pause() override;
@@ -29,6 +30,7 @@ class PiBackend : public PlayerBackend {
   String serverUrl_;
   String apiToken_;
   bool configured_ = false;
+  IdleInfo idleInfo_;
   String cachedArtPath_;
   std::shared_ptr<const AlbumArt> cachedArt_;
   String attemptedArtPath_;

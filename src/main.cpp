@@ -121,6 +121,7 @@ void recalibrateIfRequested() {
 }
 
 void applyUpdate(const BackendWorker::Update &update) {
+  ui.setIdleInfo(update.idleInfo);
   bool idle = update.status == BackendStatus::NothingPlaying ||
               update.status == BackendStatus::NoActiveDevice;
   if (update.commandFailed) {
@@ -183,6 +184,9 @@ void runAction(UiAction action) {
   bool queued = true;
   switch (action) {
     case UiAction::None: return;
+    case UiAction::WeatherInfo:
+      ui.showNotice("Weather: open-meteo.com | CC BY 4.0", false);
+      return;
     case UiAction::CycleBrightness:
       backlight.cycle();
       ui.setBrightness(backlight.percent());

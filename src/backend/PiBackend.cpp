@@ -19,8 +19,14 @@ BackendStatus parseStatus(const char *status) {
 }  // namespace
 
 bool PiBackend::begin() {
+  idleInfo_.usesPi = true;
   while (serverUrl_.endsWith("/")) serverUrl_.remove(serverUrl_.length() - 1);
   configured_ = serverUrl_.startsWith("http://") && apiToken_.length() >= 24;
+  if (serverUrl_.startsWith("http://")) {
+    idleInfo_.piAddress = serverUrl_.substring(7);
+    int port = idleInfo_.piAddress.indexOf(':');
+    if (port >= 0) idleInfo_.piAddress.remove(port);
+  }
   if (!configured_) Serial.println("Pi: set PI_SERVER_URL and PI_API_TOKEN in secrets.h");
   else Serial.printf("Pi: reading cached playback from %s\n", serverUrl_.c_str());
   return configured_;
@@ -41,26 +47,62 @@ BackendStatus PiBackend::request(const char *method, const char *path,
   http.addHeader("Authorization", "Bearer " + apiToken_);
   if (payload.length()) http.addHeader("Content-Type", "application/json");
   int code = http.sendRequest(method, payload);
+  const String peerAddress = client.remoteIP().toString();
   int length = http.getSize();
   if (code != 200 || length < 0 || length > 8192) {
+    if (strcmp(path, "/state") == 0) {
+      idleInfo_.piOnline = false;
+      idleInfo_.piAuthError = code == 401;
+    }
     Serial.printf("Pi: %s %s failed (HTTP %d, size %d)\n", method, path, code, length);
     http.end();
     return code == 401 ? BackendStatus::NotAuthorized : BackendStatus::NetworkError;
   }
   body = http.getString();
   http.end();
-  if (body.length() != size_t(length)) return BackendStatus::NetworkError;
+  if (body.length() != size_t(length)) {
+    idleInfo_.piOnline = false;
+    return BackendStatus::NetworkError;
+  }
   JsonDocument doc;
-  if (deserializeJson(doc, body) || (doc["version"] | 0) != 1) return BackendStatus::NetworkError;
+  if (deserializeJson(doc, body) || (doc["version"] | 0) != 1) {
+    idleInfo_.piOnline = false;
+    body = "";
+    return BackendStatus::NetworkError;
+  }
+  if (strcmp(path, "/state") == 0) {
+    if (!idleInfo_.piOnline) Serial.println("Pi: connected (valid state reply)");
+    idleInfo_.piOnline = true;
+    idleInfo_.piAuthError = false;
+    idleInfo_.lastPiReplyMs = millis();
+    if (peerAddress != "0.0.0.0") idleInfo_.piAddress = peerAddress;
+  }
   return parseStatus(doc["status"] | "network_error");
 }
 
 BackendStatus PiBackend::getNowPlaying(NowPlaying &out) {
   String body;
   BackendStatus status = request("GET", "/state", "", body);
-  if (status != BackendStatus::Ok) return status;
   JsonDocument doc;
-  if (deserializeJson(doc, body) || !doc["now_playing"].is<JsonObject>()) return BackendStatus::NetworkError;
+  if (body.isEmpty() || deserializeJson(doc, body) || (doc["version"] | 0) != 1) return status;
+  JsonObjectConst weather = doc["weather"];
+  idleInfo_.weatherSupported = !weather.isNull();
+  idleInfo_.weatherStatus = weather["status"] | "unavailable";
+  idleInfo_.weatherAvailable = (idleInfo_.weatherStatus == "ok" || idleInfo_.weatherStatus == "stale") &&
+                             weather["temperature"].is<float>();
+  idleInfo_.weatherStale = idleInfo_.weatherStatus == "stale";
+  idleInfo_.location = weather["location"] | "";
+  idleInfo_.weatherReceivedAtMs = millis();
+  if (idleInfo_.weatherAvailable) {
+    idleInfo_.temperature = weather["temperature"].as<float>();
+    idleInfo_.condition = weather["condition"] | "";
+    idleInfo_.fahrenheit = strcmp(weather["temperature_unit"] | "celsius", "fahrenheit") == 0;
+    idleInfo_.weatherCode = weather["weather_code"] | -1;
+    idleInfo_.isDay = weather["is_day"] | true;
+    idleInfo_.weatherAgeSeconds = weather["age_seconds"] | 0;
+  }
+  if (status != BackendStatus::Ok) return status;
+  if (!doc["now_playing"].is<JsonObject>()) return BackendStatus::NetworkError;
   JsonObjectConst state = doc["now_playing"];
   out = NowPlaying{};
   out.trackId = state["track_id"] | "";

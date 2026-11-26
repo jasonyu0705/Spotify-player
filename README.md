@@ -71,6 +71,9 @@ Spotify reports no active track or device, the screen instead shows a large
 12-hour clock with AM/PM and the date, with "Nothing is playing" underneath. The clock uses
 America/Los_Angeles time (including daylight saving time); change `CLOCK_TIMEZONE`
 in `src/config.h` for another timezone. Until NTP syncs, it shows `--:--`.
+In Pi mode, the idle screen also shows small weather details for Martinez, CA
+in Celsius and separate Wi-Fi/Pi connection indicators. Weather is fetched and
+cached on the Pi every 15 minutes; see [weather configuration](pi/README.md#idle-weather-and-connection-indicators).
 Idle polling and connection errors keep the clock visible, and only the time
 area redraws when the minute changes. Album art loads for both playing and paused
 tracks. The player returns automatically when Spotify reports a track again.
