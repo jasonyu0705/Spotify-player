@@ -377,6 +377,21 @@ class HTTPTests(unittest.TestCase):
         self.request("GET", "/state")
         self.assertTrue(self.bridge.polling_snapshot()["display_online"])
 
+    def test_cached_telemetry_survives_disabled_spotify_and_never_calls_it(self):
+        class CachedTelemetry:
+            def snapshot(self):
+                return {"status": "ok", "cpu_temperature_c": 45.6, "refresh_seconds": 60}
+
+        self.bridge.telemetry = CachedTelemetry()
+        self.bridge.set_polling(False)
+        calls = len(self.spotify.calls)
+        code, body = self.request("GET", "/state")
+        self.assertEqual(code, 200)
+        state = json.loads(body)
+        self.assertEqual(state["status"], "polling_disabled")
+        self.assertEqual(state["telemetry"]["cpu_temperature_c"], 45.6)
+        self.assertEqual(len(self.spotify.calls), calls)
+
     def test_polling_controls_require_auth_validate_boolean_and_do_not_call_spotify(self):
         calls = len(self.spotify.calls)
         self.assertEqual(self.request("POST", "/polling", '{"enabled":false}', key="wrong")[0], 401)

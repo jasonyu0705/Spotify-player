@@ -86,8 +86,13 @@ clock once Spotify stops reporting that device/track.
 ## Photo frame (internal storage, no microSD needed)
 
 Swipe horizontally anywhere on the display to switch between Spotify and your
-photo album. Spotify keeps syncing in the background; swiping back restores its
-latest state. Taps register on release so swipes do not trigger playback buttons.
+photo album. In Pi mode, a third page shows processor temperature, CPU and memory
+usage, SSD free space, uptime, and bridge status, with readings collected once per
+minute on the Pi. Swipe left to advance through Spotify/clock, photos, and Pi
+telemetry; swipe right to go back. See the [Pi setup guide](pi/README.md#pi-telemetry-swipe-page).
+Spotify keeps syncing in the background while its updates are enabled; swiping
+back restores its latest state. Taps register on release so swipes do not trigger
+playback buttons.
 
 Photos advance every **5 minutes**. Tap a photo to advance immediately; tap the
 clock badge in the top-right corner to cycle brightness. The clock uses the
@@ -202,6 +207,13 @@ Gesture regression check (host C++ compiler):
 ```bash
 c++ -std=c++11 test/host_touch_gesture.cpp -o /tmp/host_touch_gesture
 /tmp/host_touch_gesture
+```
+
+Dashboard navigation check:
+
+```bash
+c++ -std=c++11 test/host_dashboard_page.cpp -o /tmp/host_dashboard_page
+/tmp/host_dashboard_page
 ```
 
 Build firmware and the filesystem without flashing:

@@ -1,9 +1,11 @@
 #pragma once
 
 #include <Arduino.h>
+#include "backend/TelemetryInfo.h"
 
 // Cached ambient data from the backend. No UI code performs network requests.
 struct IdleInfo {
+  TelemetryInfo telemetry;
   bool usesPi = false;
   bool piOnline = false;
   bool piAuthError = false;

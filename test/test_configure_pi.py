@@ -17,11 +17,13 @@ class ConfigureTests(unittest.TestCase):
             header, env = Path(directory) / "secrets.h", Path(directory) / "spotify.env"
             header.write_text('#define SPOTIFY_CLIENT_ID "id"\n#define SPOTIFY_CLIENT_SECRET "secret"\n'
                               '#define SPOTIFY_REFRESH_TOKEN "refresh"\n')
-            env.write_text("WEATHER_REFRESH_SECONDS=3600\nWEATHER_LOCATION='Martinez, CA'\nSPOTIFY_POLL_INTERVAL=5\n")
+            env.write_text("WEATHER_REFRESH_SECONDS=3600\nWEATHER_LOCATION='Martinez, CA'\nSPOTIFY_POLL_INTERVAL=5\n"
+                           "TELEMETRY_SSD_PATH='/mnt/My SSD'\n")
             configure("http://10.0.0.248:8765", header, env)
             self.assertIn("WEATHER_REFRESH_SECONDS=3600", env.read_text())
             self.assertIn("WEATHER_LOCATION='Martinez, CA'", env.read_text())
             self.assertIn("SPOTIFY_POLL_INTERVAL=5", env.read_text())
+            self.assertIn("TELEMETRY_SSD_PATH='/mnt/My SSD'", env.read_text())
 
     def test_credentials_wifi_and_key_survive_rerun(self):
         with tempfile.TemporaryDirectory() as directory:

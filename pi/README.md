@@ -146,7 +146,7 @@ The existing clock and photo album continue working independently.
 From the project root in a **Mac terminal**, copy the Python files:
 
 ```bash
-scp pi/spotify_bridge.py pi/weather.py pi/polling.py jasonyu0705@10.0.0.248:~/projects/Spotify_ESP/pi/
+scp pi/spotify_bridge.py pi/weather.py pi/telemetry.py pi/polling.py jasonyu0705@10.0.0.248:~/projects/Spotify_ESP/pi/
 ```
 
 If the running bridge is already rate limited, first follow the cooldown
@@ -165,6 +165,50 @@ the Mac with `pio run -e controller-pi -t upload`.
 An older Pi service still works for Spotify; the new UI prompts to update the
 bridge when the weather field is missing. The direct `controller` environment
 shows Wi-Fi status; weather requires `controller-pi`.
+
+## Pi telemetry swipe page
+
+In `controller-pi` firmware, swiping left cycles through **Spotify/clock → photos
+→ Pi telemetry → Spotify/clock**. Swiping right moves in the opposite direction.
+The normal direct-Spotify firmware keeps its existing two-page navigation.
+
+The Pi collects local readings **once every 60 seconds** on a separate thread:
+
+- Processor temperature in Celsius.
+- CPU usage averaged between samples; the first average appears after one minute.
+- Memory used, shown as a percentage and used/total MiB.
+- SSD free/total GiB and whether the drive is mounted.
+- Pi uptime since boot.
+
+The telemetry page also shows the current cached Spotify bridge status and Pi
+connection status. If the Pi goes offline, the last received readings remain
+visible and the connection indicator shows Pi offline. Missing sensors
+show unavailable values without hiding the other readings.
+
+No extra packages, external API requests, or telemetry HTTP polling are needed.
+The collector reads Linux `/proc` and `/sys` counters and filesystem metadata;
+cached values are included in the ESP32's existing authenticated `/state` reads.
+Collection continues while Spotify updates are OFF or the ESP32 is off. It does
+not wake Spotify polling or change Spotify's rate-limit cooldown.
+
+The SSD mount path defaults to `/mnt/jasons-ssd`. To use another mount location,
+add this to the Pi's private `spotify.env` file and restart the service:
+
+```text
+TELEMETRY_SSD_PATH=/mnt/jasons-ssd
+```
+
+The collector checks the mount table before reading free space, so an unmounted
+SSD does not accidentally report SD-card space. It never mounts/unmounts the SSD
+or writes to it. Unplugging a mounted SSD still requires normal safe unmounting.
+
+Copy **all four** Python files (`spotify_bridge.py`, `weather.py`, `telemetry.py`,
+and `polling.py`) using the update command above, restart the Pi service, and flash
+`controller-pi` on the ESP32. Until the Pi is updated, this page says **Update the
+Pi bridge**. JSON `/state` responses include a `telemetry` object with `status`,
+`age_seconds`, `refresh_seconds`, `cpu_temperature_c`, `cpu_percent`, `memory`,
+`ssd`, and `uptime_seconds`. Individual missing readings are `null`; loading or
+unavailable responses may only contain status and refresh interval.
 
 ## Stop Spotify polling when the display is off
 

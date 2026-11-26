@@ -23,6 +23,7 @@ import urllib.parse
 import urllib.request
 
 from weather import WeatherCache
+from telemetry import TelemetryCache
 
 LOG = logging.getLogger("spotify-bridge")
 MAX_ART_BYTES = 64 * 1024
@@ -286,9 +287,10 @@ def command_request(command, value=None):
 
 
 class Bridge:
-    def __init__(self, spotify, poll_interval=DEFAULT_POLL_INTERVAL, weather=None, polling_file=None):
+    def __init__(self, spotify, poll_interval=DEFAULT_POLL_INTERVAL, weather=None, polling_file=None, telemetry=None):
         self.spotify = spotify
         self.weather = weather
+        self.telemetry = telemetry
         self.poll_interval = poll_interval
         self.spotify_lock = threading.Lock()
         self.state_lock = threading.Lock()
@@ -376,6 +378,7 @@ class Bridge:
         # Weather uses a separate lock/thread and is present even when Spotify
         # reports idle, authorization errors, or unsupported playback.
         result["weather"] = self.weather.snapshot() if self.weather else {"status": "not_configured"}
+        result["telemetry"] = self.telemetry.snapshot() if self.telemetry else {"status": "not_configured"}
         result["retry_after_seconds"] = self.spotify.cooldown_remaining()
         result["rate_limit_reason"] = self.spotify.rate_limit_reason if result["retry_after_seconds"] else ""
         return result
@@ -502,6 +505,8 @@ class Bridge:
     def start(self):
         if self.weather:
             self.weather.start()
+        if self.telemetry:
+            self.telemetry.start()
         for target in (self._poll_loop, self._art_loop):
             thread = threading.Thread(target=target, daemon=True)
             thread.start()
@@ -513,6 +518,8 @@ class Bridge:
         self.art_wakeup.set()
         if self.weather:
             self.weather.close()
+        if self.telemetry:
+            self.telemetry.close()
 
 
 def make_server(address, bridge, api_token):
@@ -624,7 +631,8 @@ def main():
             client.record_cooldown_until(deadline.timestamp())
             print("Saved Spotify cooldown; %d seconds remaining. Service was not started." % client.cooldown_remaining())
             return
-        bridge = Bridge(client, interval, WeatherCache.from_env(), client.token_file.with_suffix(".polling.json"))
+        bridge = Bridge(client, interval, WeatherCache.from_env(), client.token_file.with_suffix(".polling.json"),
+                        telemetry=TelemetryCache.from_env())
         address = (os.environ.get("PI_BIND", "0.0.0.0"), int(os.environ.get("PI_PORT", "8765")))
         server = make_server(address, bridge, os.environ["PI_API_TOKEN"])
     except (OSError, ValueError, TypeError) as error:

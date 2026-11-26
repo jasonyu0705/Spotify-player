@@ -52,7 +52,7 @@ def configure(server_url, secrets_path, env_path):
     if env_path.exists():
         for line in env_path.read_text().splitlines():
             key, separator, value = line.strip().partition("=")
-            if separator and (key.startswith("WEATHER_") or key == "SPOTIFY_POLL_INTERVAL") and key.replace("_", "").isalnum():
+            if separator and (key.startswith(("WEATHER_", "TELEMETRY_")) or key == "SPOTIFY_POLL_INTERVAL") and key.replace("_", "").isalnum():
                 parts = shlex.split(value, comments=True)
                 if len(parts) != 1:
                     raise ValueError("Invalid environment value for " + key)

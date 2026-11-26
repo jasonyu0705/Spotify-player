@@ -15,6 +15,8 @@
 #include "ui/Backlight.h"
 #include "ui/PhotoFrame.h"
 #include "ui/TouchGesture.h"
+#include "ui/DashboardPage.h"
+#include "ui/TelemetryPage.h"
 
 #if !__has_include("secrets.h")
 #error "Copy include/secrets.h.example to include/secrets.h and fill it in (see README.md)"
@@ -39,8 +41,9 @@ TFT_eSPI tft;
 PlayerUI ui(tft);
 Backlight backlight;
 PhotoFrame photoFrame(tft);
+TelemetryPage telemetryPage(tft);
 TouchGesture gesture;
-bool showingPhotos = false;
+DashboardPage dashboardPage = DashboardPage::Player;
 #ifdef USE_PI_BACKEND
 PiBackend backend(PI_SERVER_URL, PI_API_TOKEN);
 #else
@@ -115,7 +118,8 @@ void recalibrateIfRequested() {
     touchcal::loadOrCalibrate(tft, SCREEN_ROTATION, true);
     gesture.reset();
     ui.showMessage("Calibrated", "Loading player...");
-    if (showingPhotos) photoFrame.show();
+    if (dashboardPage == DashboardPage::Photos) photoFrame.show();
+    else if (dashboardPage == DashboardPage::Telemetry) telemetryPage.show();
     else if (showingClock) ui.showClock();
     else if (havePlayback) ui.update(nowPlaying);
   }
@@ -123,6 +127,7 @@ void recalibrateIfRequested() {
 
 void applyUpdate(const BackendWorker::Update &update) {
   ui.setIdleInfo(update.idleInfo);
+  telemetryPage.setInfo(update.idleInfo);
   spotifyUpdatesEnabled = update.idleInfo.pollingEnabled;
   bool idle = update.status == BackendStatus::NothingPlaying ||
               update.status == BackendStatus::NoActiveDevice ||
@@ -215,11 +220,18 @@ void runAction(UiAction action) {
   }
 }
 
-void switchScreen() {
-  showingPhotos = !showingPhotos;
-  ui.setVisible(!showingPhotos);
-  if (showingPhotos) {
+void switchScreen(bool forward) {
+#ifdef USE_PI_BACKEND
+  constexpr bool piMode = true;
+#else
+  constexpr bool piMode = false;
+#endif
+  dashboardPage = nextDashboardPage(dashboardPage, forward, piMode);
+  ui.setVisible(dashboardPage == DashboardPage::Player);
+  if (dashboardPage == DashboardPage::Photos) {
     photoFrame.show();
+  } else if (dashboardPage == DashboardPage::Telemetry) {
+    telemetryPage.show();
   } else if (showingClock) {
     ui.showClock();
   } else if (havePlayback) {
@@ -270,9 +282,9 @@ void loop() {
   bool pressed = readTouch(x, y);
   TouchEvent event = gesture.update(pressed, x, y, millis());
   if (event == TouchEvent::SwipeLeft || event == TouchEvent::SwipeRight) {
-    switchScreen();
+    switchScreen(event == TouchEvent::SwipeLeft);
   } else if (event == TouchEvent::Tap) {
-    if (showingPhotos) {
+    if (dashboardPage == DashboardPage::Photos) {
       // The clock badge doubles as a brightness control.
       if (photoFrame.clockContains(gesture.tapX(), gesture.tapY())) {
         backlight.cycle();
@@ -280,7 +292,7 @@ void loop() {
       } else {
         photoFrame.next();
       }
-    } else {
+    } else if (dashboardPage == DashboardPage::Player) {
       runAction(ui.actionAt(gesture.tapX(), gesture.tapY()));
     }
   }
@@ -288,7 +300,8 @@ void loop() {
   BackendWorker::Update update;
   if (worker.takeUpdate(update)) applyUpdate(update);
 
-  if (showingPhotos) photoFrame.tick();
+  if (dashboardPage == DashboardPage::Photos) photoFrame.tick();
+  else if (dashboardPage == DashboardPage::Telemetry) telemetryPage.tick();
   else ui.tick();
   backlight.tick();
   delay(5);
