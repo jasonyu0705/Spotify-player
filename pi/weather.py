@@ -1,9 +1,11 @@
 """Small Open-Meteo cache. Only its background thread makes weather requests."""
 
+import http.client
 import json
 import logging
 import math
 import os
+import socket
 import threading
 import time
 import urllib.error
@@ -11,6 +13,53 @@ import urllib.parse
 import urllib.request
 
 LOG = logging.getLogger("spotify-bridge.weather")
+WEATHER_HOST = "api.open-meteo.com"
+# Alternate free-API node documented in Open-Meteo issue #2329. Only the
+# socket destination changes: HTTP Host, TLS SNI, and certificate checks retain
+# api.open-meteo.com. No process-wide DNS or Spotify connections are modified.
+WEATHER_FALLBACK_IP = "167.114.211.86"
+REQUEST_TIMEOUT = 15
+
+
+def error_detail(error):
+    reason = error.reason if isinstance(error, urllib.error.URLError) else error
+    return str(reason).replace("\n", " ").replace("\r", " ")[:180]
+
+
+def fallback_socket(address, timeout=REQUEST_TIMEOUT, source_address=None):
+    if address != (WEATHER_HOST, 443):
+        raise ValueError("Unexpected weather fallback destination")
+    return socket.create_connection((WEATHER_FALLBACK_IP, 443), timeout, source_address)
+
+
+def read_fallback(request):
+    connection = http.client.HTTPSConnection(WEATHER_HOST, timeout=REQUEST_TIMEOUT)
+    # HTTPSConnection.connect() still wraps this socket with its default verified
+    # TLS context and the original hostname. This hook affects this instance only.
+    connection._create_connection = fallback_socket
+    try:
+        connection.request("GET", request.selector, headers=dict(request.header_items()))
+        with connection.getresponse() as response:
+            if response.status != 200:
+                raise urllib.error.HTTPError(request.full_url, response.status, response.reason, response.headers, None)
+            return response.read(32769)
+    finally:
+        connection.close()
+
+
+def read_weather(request):
+    try:
+        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
+            return response.read(32769)
+    except urllib.error.HTTPError:
+        # Don't retry API rejections (especially 429) against another node.
+        raise
+    except (OSError, http.client.HTTPException) as error:
+        LOG.warning("Weather primary connection failed (%s: %s); trying fallback server",
+                    type(error).__name__, error_detail(error))
+    raw = read_fallback(request)
+    LOG.info("Weather fallback server succeeded (%s)", WEATHER_FALLBACK_IP)
+    return raw
 
 
 def condition_name(code, is_day=True):
@@ -73,11 +122,10 @@ class WeatherCache:
         query = urllib.parse.urlencode({"latitude": self.latitude, "longitude": self.longitude,
                                        "current": "temperature_2m,weather_code,is_day",
                                        "temperature_unit": self.unit, "forecast_days": 1})
-        request = urllib.request.Request("https://api.open-meteo.com/v1/forecast?" + query,
+        request = urllib.request.Request("https://" + WEATHER_HOST + "/v1/forecast?" + query,
                                          headers={"User-Agent": "SpotifyESP-Pi/1"})
         try:
-            with urllib.request.urlopen(request, timeout=15) as response:
-                raw = response.read(32769)
+            raw = read_weather(request)
             if len(raw) > 32768:
                 raise ValueError("Weather response too large")
             current = json.loads(raw)["current"]
@@ -93,13 +141,13 @@ class WeatherCache:
             with self.lock:
                 self.data, self.fetched_at, self.failed = data, time.monotonic(), False
             LOG.info("Weather updated for %s (next request in %d minutes)", self.location, self.interval // 60)
-        except (OSError, urllib.error.URLError, ValueError, KeyError, TypeError) as error:
+        except (OSError, http.client.HTTPException, ValueError, KeyError, TypeError) as error:
             if isinstance(error, urllib.error.HTTPError):
                 error.close()
             with self.lock:
                 self.failed = True
-            LOG.warning("Weather update failed (%s); keeping cache, retry in %d minutes",
-                        type(error).__name__, self.interval // 60)
+            LOG.warning("Weather update failed (%s: %s); keeping cache, retry in %d minutes",
+                        type(error).__name__, error_detail(error), self.interval // 60)
         return True
 
     def _run(self):

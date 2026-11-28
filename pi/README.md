@@ -136,9 +136,22 @@ row to view the provider credit in the status bar. Weather data is provided by
 [Open-Meteo](https://open-meteo.com/) under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/);
 the display rounds temperatures and maps weather codes to concise labels/icons.
 
-Failed requests keep the previous weather with a `(cached)` label and wait until
-the next scheduled refresh. With no successful reading, the display says weather
-is unavailable. Pi connection failures also mark retained weather as cached.
+If the usual Open-Meteo connection times out or breaks, the Pi makes one attempt
+against alternate free-API server `167.114.211.86` during the same scheduled
+refresh. The hostname remains `api.open-meteo.com` for the HTTP Host header,
+TLS SNI, and certificate verification. This only changes the destination socket
+for that one weather request; no system DNS, router, or Spotify settings change.
+The fallback addresses a [reported US-West connection problem](https://github.com/open-meteo/open-meteo/issues/2329).
+API error responses, including HTTP 429, do not trigger failover. Each attempt
+has a 15-second timeout and runs on the weather thread, so display reads stay
+responsive. Normal refreshes still happen once every 15 minutes by default.
+
+If both connections fail, the Pi keeps the previous weather with a `(cached)`
+label and waits until the next scheduled refresh. With no successful reading,
+the display says weather is unavailable. Logs include the actual connection
+error and `Weather fallback server succeeded` when the alternate responds.
+The fallback IP may need updating if Open-Meteo retires that server. Pi connection
+failures also mark retained weather as cached.
 The existing clock and photo album continue working independently.
 
 ### Update an existing Pi installation
